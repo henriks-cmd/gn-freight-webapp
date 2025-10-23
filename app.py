@@ -157,12 +157,15 @@ if "app_state" not in st.session_state:
     st.session_state.app_state = DEFAULT_STATE
 
 state = st.session_state.app_state
+# Backwards-compatible default for new setting
+state["settings"].setdefault("kgPerContainer", 1000.0)
 
 # ------------------------ Sidebar: Settings & Data ------------------------
 st.sidebar.title("Settings")
 state["settings"]["kgPerFLM"] = st.sidebar.number_input("kg per FLM", value=state["settings"]["kgPerFLM"], step=10.0)
 state["settings"]["flmPerPallet"] = st.sidebar.number_input("FLM per pallet", value=state["settings"]["flmPerPallet"], step=0.01, format="%.2f")
 state["settings"]["roundingStep"] = st.sidebar.number_input("Rounding step (€)", value=state["settings"]["roundingStep"], step=1.0)
+state["settings"]["kgPerContainer"] = st.sidebar.number_input("kg per Container", value=state["settings"].get("kgPerContainer", 1000.0), step=10.0)
 
 with st.sidebar.expander("Global surcharges (defaults)"):
     s = state["surcharges"]
@@ -194,7 +197,7 @@ with st.sidebar.expander("Data: lanes import/export"):
             st.error(f"Failed to load: {e}")
 
 # ------------------------ Tabs ------------------------
-tabs = st.tabs(["Calculator", "LDM Scaler", "Weight Scaler", "Admin"])  # type: ignore
+tabs = st.tabs(["Calculator", "LDM Scaler", "Weight Scaler", "Containers", "Admin"])  # type: ignore
 
 # ------------------------ Calculator ------------------------
 with tabs[0]:
@@ -474,7 +477,61 @@ with tabs[2]:
         st.download_button("Download new ladder (CSV)", data=df_out.to_csv(index=False), file_name=f"{lane_id.replace('>','-')}-retiered.csv")
 
 # ------------------------ Admin ------------------------
+# ------------------------ Containers Scaler ------------------------
 with tabs[3]:
+    st.subheader("Containers – scale 1–19 from FTL (20 containers)")
+    col1, col2, col3, col4, col5, col6 = st.columns(6)
+    with col1:
+        p20 = st.number_input("FTL = 20 containers (EUR)", value=2000.0, step=10.0)
+    with col2:
+        model_choice = st.selectbox("Model", options=["POWER","EXP","AUTO"], index=0)
+    with col3:
+        b_cont = st.number_input("POWER: b", value=-0.25, step=0.01, format="%.5f")
+    with col4:
+        d_cont = st.number_input("EXP: d", value=-0.00002, step=0.00001, format="%.6f")
+    with col5:
+        kg_per_container = st.number_input("kg per Container", value=float(state["settings"].get("kgPerContainer", 1000.0)), step=10.0)
+    with col6:
+        rounding_step = st.number_input("Rounding step €", value=state["settings"].get("roundingStep", 1.0), step=1.0)
+
+    kg20 = 20 * kg_per_container
+    chosen = model_choice if model_choice != "AUTO" else "POWER"
+
+    rows = []
+    for n in range(1, 20):
+        kg_n = n * kg_per_container
+        if chosen == "POWER":
+            price = p20 * ((n/20) ** (b_cont + 1))
+        else:
+            price = p20 * ((kg_n / kg20) * math.exp(d_cont * (kg_n - kg20))) if kg20 else float("nan")
+        rounded = round_to_step(price, rounding_step)
+        rows.append({
+            "Containers": n,
+            "kg (est)": kg_n,
+            "Total EUR": price,
+            "Rounded EUR": rounded,
+            "EUR/container": price / n if n>0 else float("nan"),
+        })
+    # Add FTL row
+    rows.append({
+        "Containers": 20,
+        "kg (est)": kg20,
+        "Total EUR": p20,
+        "Rounded EUR": round_to_step(p20, rounding_step),
+        "EUR/container": p20/20,
+    })
+
+    df_cont = pd.DataFrame(rows)
+    st.dataframe(df_cont.style.format({
+        "kg (est)": "{:.0f}",
+        "Total EUR": "€ {:.2f}",
+        "Rounded EUR": "€ {:.2f}",
+        "EUR/container": "€ {:.2f}"
+    }), use_container_width=True)
+    st.download_button("Download container table (CSV)", data=df_cont.to_csv(index=False), file_name="container_prices.csv")
+
+# ------------------------ Admin ------------------------
+with tabs[4]:
     st.subheader("Admin – lanes & settings")
     st.info("Use the JSON export/import in the sidebar for backups. Data persists in your browser session.")
 
@@ -524,4 +581,3 @@ with tabs[3]:
     if st.button("Reset to defaults"):
         st.session_state.app_state = DEFAULT_STATE
         st.experimental_rerun()
-
