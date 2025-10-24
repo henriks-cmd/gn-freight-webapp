@@ -176,7 +176,7 @@ with st.sidebar.expander("Global surcharges (defaults)"):
     s["perKgEUR"] = st.number_input("Per kg €", value=s["perKgEUR"], step=0.001, format="%.4f")
     s["flatEUR"] = st.number_input("Flat €", value=s["flatEUR"], step=1.0)
     st.write("**FR roadfee helper**")
-    s["frClass"] = int(st.selectbox("FR Class", options=[3,4], index=1 if s["frClass"]==4 else 0))
+    s["frClass"] = int(st.selectbox("FR Class", options=[3,4], index=1 if s["frClass"]==4 else 0, key="sidebar_fr_class"))
     s["frKm"] = st.number_input("FR toll km", value=s["frKm"], step=10.0)
     s["frEurPerKmClass3"] = st.number_input("€/km Class 3", value=s["frEurPerKmClass3"], step=0.01)
     s["frEurPerKmClass4"] = st.number_input("€/km Class 4", value=s["frEurPerKmClass4"], step=0.01)
@@ -295,7 +295,7 @@ with tabs[0]:
         st.info("FR roadfee helper below adds into Flat if toggled.")
         r1, r2, r3, r4, r5 = st.columns(5)
         with r1:
-            fr_class = int(st.selectbox("FR Class", options=[3,4], index=1 if state["surcharges"]["frClass"]==4 else 0))
+            fr_class = int(st.selectbox("FR Class", options=[3,4], index=1 if state["surcharges"]["frClass"]==4 else 0, key="calc_fr_class"))
         with r2:
             fr_km = st.number_input("FR toll km", value=state["surcharges"]["frKm"], step=10.0)
         with r3:
@@ -336,7 +336,7 @@ with tabs[1]:
     with col2:
         p13 = st.number_input("P13 (EUR)", value=2000.0, step=10.0)
     with col3:
-        model_choice = st.selectbox("Model", options=["AUTO","POWER","EXP"], index=0)
+        model_choice = st.selectbox("Model", options=["AUTO","POWER","EXP"], index=0, key="ldm_model_choice")
     # Fit defaults based on lane SE->FR (you can change below)
     lane = state["lanes"].get("SE->FR")
     rows_for_fit = [
@@ -397,9 +397,9 @@ with tabs[2]:
     with c1:
         lane_id = st.text_input("Lane ID", value="SE->FR")
     with c2:
-        model_sel = st.selectbox("Model", options=["AUTO","POWER","EXP"], index=0)
+        model_sel = st.selectbox("Model", options=["AUTO","POWER","EXP"], index=0, key="weight_model_sel")
     with c3:
-        method = st.selectbox("Method", options=["INTEGRATED","POINT"], index=0)
+        method = st.selectbox("Method", options=["INTEGRATED","POINT"], index=0, key="weight_method_sel")
 
     lane = state["lanes"].get(lane_id)
     if not lane:
@@ -484,7 +484,7 @@ with tabs[3]:
     with col1:
         p20 = st.number_input("FTL = 20 containers (EUR)", value=2000.0, step=10.0)
     with col2:
-        model_choice = st.selectbox("Model", options=["POWER","EXP","AUTO"], index=0)
+        model_choice = st.selectbox("Model", options=["POWER","EXP","AUTO"], index=0, key="containers_model_choice")
     with col3:
         b_cont = st.number_input("POWER: b", value=-0.25, step=0.01, format="%.5f")
     with col4:
