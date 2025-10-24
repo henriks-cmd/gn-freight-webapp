@@ -10,11 +10,11 @@
 # - Surcharges: fuel %, MARPOL %, extra %, per-LDM, per-kg, flat; FR roadfee helper
 # - LDM Scaler: 1–13 LDM from P13 (POWER/EXP) or from fitted model
 # - Weight Scaler: retier to new weight breaks (INTEGRATED exact / POINT approx)
+# - Containers: scale 1–19 from FTL (=20 containers)
 # - Admin: manage lanes, settings, import/export JSON
 
 import json
 import math
-from dataclasses import dataclass, asdict
 from typing import List, Dict, Tuple
 
 import numpy as np
@@ -22,7 +22,7 @@ import pandas as pd
 import streamlit as st
 
 st.set_page_config(page_title="GN Freight WebApp", layout="wide")
-
+__version__ = "2025-10-24.1"
 # ------------------------ Helpers ------------------------
 
 def clamp_number(v):
@@ -64,8 +64,7 @@ def fit_power_model(rows: List[Dict]):
             y.append(math.log(rate))
     if len(x) < 2:
         return dict(b=float("nan"), c=float("nan"), A=float("nan"), r2=float("nan"))
-    x = np.array(x)
-    y = np.array(y)
+    x = np.array(x); y = np.array(y)
     b, c, r2 = lin_reg(x, y)
     A = math.exp(c)
     return dict(b=b, c=c, A=A, r2=r2)
@@ -81,8 +80,7 @@ def fit_exp_model(rows: List[Dict]):
             y.append(math.log(rate))
     if len(x) < 2:
         return dict(d=float("nan"), c=float("nan"), A=float("nan"), r2=float("nan"))
-    x = np.array(x)
-    y = np.array(y)
+    x = np.array(x); y = np.array(y)
     d, c, r2 = lin_reg(x, y)
     A = math.exp(c)
     return dict(d=d, c=c, A=A, r2=r2)
@@ -103,12 +101,14 @@ def price_from_ladder(weight_kg: float, ladder: List[Dict]):
     return dict(total=total, rate=rate, min=min_eur, row=chosen)
 
 
-# ------------------------ Data Model & Defaults ------------------------
+# ------------------------ Defaults & State ------------------------
+
 DEFAULT_STATE = {
     "settings": {
         "kgPerFLM": 1850.0,
         "flmPerPallet": 0.4,
         "roundingStep": 1.0,
+        "kgPerContainer": 1000.0,
     },
     "lanes": {
         "SE->FR": {
@@ -157,36 +157,46 @@ if "app_state" not in st.session_state:
     st.session_state.app_state = DEFAULT_STATE
 
 state = st.session_state.app_state
-# Backwards-compatible default for new setting
+# Backwards-compat for older sessions
 state["settings"].setdefault("kgPerContainer", 1000.0)
 
-# ------------------------ Sidebar: Settings & Data ------------------------
+# ------------------------ Sidebar ------------------------
+
 st.sidebar.title("Settings")
-state["settings"]["kgPerFLM"] = st.sidebar.number_input("kg per FLM", value=state["settings"]["kgPerFLM"], step=10.0)
-state["settings"]["flmPerPallet"] = st.sidebar.number_input("FLM per pallet", value=state["settings"]["flmPerPallet"], step=0.01, format="%.2f")
-state["settings"]["roundingStep"] = st.sidebar.number_input("Rounding step (€)", value=state["settings"]["roundingStep"], step=1.0)
-state["settings"]["kgPerContainer"] = st.sidebar.number_input("kg per Container", value=state["settings"].get("kgPerContainer", 1000.0), step=10.0)
+st.sidebar.caption(f"Version: {__version__}")
+state["settings"]["kgPerFLM"] = st.sidebar.number_input(
+    "kg per FLM", value=state["settings"]["kgPerFLM"], step=10.0, key="sidebar_kgperflm"
+)
+state["settings"]["flmPerPallet"] = st.sidebar.number_input(
+    "FLM per pallet", value=state["settings"]["flmPerPallet"], step=0.01, format="%.2f", key="sidebar_flmperpallet"
+)
+state["settings"]["roundingStep"] = st.sidebar.number_input(
+    "Rounding step (€)", value=state["settings"]["roundingStep"], step=1.0, key="sidebar_round"
+)
+state["settings"]["kgPerContainer"] = st.sidebar.number_input(
+    "kg per Container", value=state["settings"]["kgPerContainer"], step=10.0, key="sidebar_kgpercontainer"
+)
 
-with st.sidebar.expander("Global surcharges (defaults)"):
+with st.sidebar.expander("Global surcharges (defaults)", expanded=False):
     s = state["surcharges"]
-    s["fuelPct"] = st.number_input("Fuel % (e.g. 0.12 = 12%)", value=s["fuelPct"], step=0.01, format="%.4f")
-    s["marpolPct"] = st.number_input("MARPOL %", value=s["marpolPct"], step=0.01, format="%.4f")
-    s["extraPct"] = st.number_input("Extra %", value=s["extraPct"], step=0.01, format="%.4f")
-    s["perLdmEUR"] = st.number_input("Per LDM €", value=s["perLdmEUR"], step=1.0)
-    s["perKgEUR"] = st.number_input("Per kg €", value=s["perKgEUR"], step=0.001, format="%.4f")
-    s["flatEUR"] = st.number_input("Flat €", value=s["flatEUR"], step=1.0)
+    s["fuelPct"]   = st.number_input("Fuel % (e.g. 0.12 = 12%)", value=s["fuelPct"], step=0.01, format="%.4f", key="sidebar_fuel")
+    s["marpolPct"] = st.number_input("MARPOL %", value=s["marpolPct"], step=0.01, format="%.4f", key="sidebar_marpol")
+    s["extraPct"]  = st.number_input("Extra %", value=s["extraPct"], step=0.01, format="%.4f", key="sidebar_extra")
+    s["perLdmEUR"] = st.number_input("Per LDM €", value=s["perLdmEUR"], step=1.0, key="sidebar_perldm")
+    s["perKgEUR"]  = st.number_input("Per kg €", value=s["perKgEUR"], step=0.001, format="%.4f", key="sidebar_perkg")
+    s["flatEUR"]   = st.number_input("Flat €", value=s["flatEUR"], step=1.0, key="sidebar_flat")
     st.write("**FR roadfee helper**")
-    s["frClass"] = int(st.selectbox("FR Class", options=[3,4], index=1 if s["frClass"]==4 else 0, key="sidebar_fr_class"))
-    s["frKm"] = st.number_input("FR toll km", value=s["frKm"], step=10.0)
-    s["frEurPerKmClass3"] = st.number_input("€/km Class 3", value=s["frEurPerKmClass3"], step=0.01)
-    s["frEurPerKmClass4"] = st.number_input("€/km Class 4", value=s["frEurPerKmClass4"], step=0.01)
-    s["frSpecialEUR"] = st.number_input("Special points €", value=s["frSpecialEUR"], step=1.0)
-    s["includeFRinFlat"] = st.checkbox("Include FR roadfee in Flat", value=s["includeFRinFlat"])
+    s["frClass"]   = int(st.selectbox("FR Class", options=[3,4], index=1 if s["frClass"]==4 else 0, key="sidebar_fr_class"))
+    s["frKm"]      = st.number_input("FR toll km", value=s["frKm"], step=10.0, key="sidebar_fr_km")
+    s["frEurPerKmClass3"] = st.number_input("€/km Class 3", value=s["frEurPerKmClass3"], step=0.01, key="sidebar_fr_c3")
+    s["frEurPerKmClass4"] = st.number_input("€/km Class 4", value=s["frEurPerKmClass4"], step=0.01, key="sidebar_fr_c4")
+    s["frSpecialEUR"] = st.number_input("Special points €", value=s["frSpecialEUR"], step=1.0, key="sidebar_fr_special")
+    s["includeFRinFlat"] = st.checkbox("Include FR roadfee in Flat", value=s["includeFRinFlat"], key="sidebar_fr_include")
 
-with st.sidebar.expander("Data: lanes import/export"):
+with st.sidebar.expander("Data: lanes import/export", expanded=False):
     lanes_json = json.dumps(state["lanes"], indent=2)
-    st.download_button("Download lanes.json", data=lanes_json, file_name="lanes.json")
-    up = st.file_uploader("Upload lanes.json", type=["json"])
+    st.download_button("Download lanes.json", data=lanes_json, file_name="lanes.json", key="sidebar_dl_lanes")
+    up = st.file_uploader("Upload lanes.json", type=["json"], key="sidebar_upload_lanes")
     if up is not None:
         try:
             loaded = json.load(up)
@@ -197,26 +207,28 @@ with st.sidebar.expander("Data: lanes import/export"):
             st.error(f"Failed to load: {e}")
 
 # ------------------------ Tabs ------------------------
-tabs = st.tabs(["Calculator", "LDM Scaler", "Weight Scaler", "Containers", "Admin"])  # type: ignore
+
+tabs = st.tabs(["Calculator", "LDM Scaler", "Weight Scaler", "Containers", "Admin"])
 
 # ------------------------ Calculator ------------------------
 with tabs[0]:
     st.subheader("Calculator")
+
     colA, colB, colC, colD = st.columns(4)
     with colA:
-        origin = st.text_input("Origin", value="SE")
+        origin = st.text_input("Origin", value="SE", key="calc_origin")
     with colB:
-        dest = st.text_input("Destination", value="FR")
+        dest = st.text_input("Destination", value="FR", key="calc_dest")
     with colC:
-        pallets = st.number_input("Pallets", value=10, step=1)
+        pallets = st.number_input("Pallets", value=10, step=1, key="calc_pallets")
     with colD:
-        weight = st.number_input("Weight (kg)", value=3500, step=50)
+        weight = st.number_input("Weight (kg)", value=3500, step=50, key="calc_weight")
 
     colE, colF, colG, colH = st.columns(4)
     with colE:
-        ldm_manual = st.text_input("LDM (optional)", value="")
+        ldm_manual = st.text_input("LDM (optional)", value="", key="calc_ldm")
     with colF:
-        tariff = st.selectbox("Tariff", options=["auto","per_kg","per_pallet","per_flm"], index=0)
+        tariff = st.selectbox("Tariff", options=["auto","per_kg","per_pallet","per_flm"], index=0, key="calc_tariff")
     with colG:
         kg_per_flm = state["settings"]["kgPerFLM"]
         st.metric("kg/FLM", kg_per_flm)
@@ -244,13 +256,12 @@ with tabs[0]:
         total_flm = max(ldm_val * rate_flm, min_flm)
 
         if tariff == "per_kg":
-            base = ("per_kg", perkg["total"]) 
+            base = ("per_kg", perkg["total"])
         elif tariff == "per_pallet":
             base = ("per_pallet", total_pal)
         elif tariff == "per_flm":
             base = ("per_flm", total_flm)
         else:
-            # auto choose lowest
             candidates = [("per_kg", perkg["total"]), ("per_pallet", total_pal), ("per_flm", total_flm)]
             base = min(candidates, key=lambda t: t[1])
 
@@ -261,7 +272,7 @@ with tabs[0]:
         c3.metric("Per FLM", f"€ {total_flm:.2f}")
         c4.metric("Chosen", f"{base[0]} → € {base[1]:.2f}")
 
-        # fit from ladder
+        # Fit from ladder
         rows_for_fit = [
             dict(breakToKg=float(r.get("breakToKg")), ratePerKg=float(r.get("ratePerKg")))
             for r in lane.get("perKg", []) if clamp_number(r.get("breakToKg")) and clamp_number(r.get("ratePerKg"))
@@ -274,21 +285,21 @@ with tabs[0]:
         s_local = {}
         cA, cB, cC, cD = st.columns(4)
         with cA:
-            s_local["fuelPct"] = st.number_input("Fuel % (decimal)", value=state["surcharges"]["fuelPct"], step=0.01, format="%.4f")
+            s_local["fuelPct"] = st.number_input("Fuel % (decimal)", value=state["surcharges"]["fuelPct"], step=0.01, format="%.4f", key="calc_fuel")
         with cB:
-            s_local["marpolPct"] = st.number_input("MARPOL % (decimal)", value=state["surcharges"]["marpolPct"], step=0.01, format="%.4f")
+            s_local["marpolPct"] = st.number_input("MARPOL % (decimal)", value=state["surcharges"]["marpolPct"], step=0.01, format="%.4f", key="calc_marpol")
         with cC:
-            s_local["extraPct"] = st.number_input("Extra % (decimal)", value=state["surcharges"]["extraPct"], step=0.01, format="%.4f")
+            s_local["extraPct"] = st.number_input("Extra % (decimal)", value=state["surcharges"]["extraPct"], step=0.01, format="%.4f", key="calc_extra")
         with cD:
-            rounding_step = st.number_input("Rounding step €", value=state["settings"]["roundingStep"], step=1.0)
+            rounding_step = st.number_input("Rounding step €", value=state["settings"]["roundingStep"], step=1.0, key="calc_round")
 
         cE, cF, cG, cH = st.columns(4)
         with cE:
-            s_local["perLdmEUR"] = st.number_input("Per LDM €", value=state["surcharges"]["perLdmEUR"], step=1.0)
+            s_local["perLdmEUR"] = st.number_input("Per LDM €", value=state["surcharges"]["perLdmEUR"], step=1.0, key="calc_perldm")
         with cF:
-            s_local["perKgEUR"] = st.number_input("Per kg €", value=state["surcharges"]["perKgEUR"], step=0.001, format="%.4f")
+            s_local["perKgEUR"] = st.number_input("Per kg €", value=state["surcharges"]["perKgEUR"], step=0.001, format="%.4f", key="calc_perkg")
         with cG:
-            s_local["flatEUR"] = st.number_input("Flat €", value=state["surcharges"]["flatEUR"], step=1.0)
+            s_local["flatEUR"] = st.number_input("Flat €", value=state["surcharges"]["flatEUR"], step=1.0, key="calc_flat")
         with cH:
             st.metric("Model (R²)", f"{chosen_model} (P {pow_fit['r2']:.3f} / E {exp_fit['r2']:.3f})")
 
@@ -297,19 +308,19 @@ with tabs[0]:
         with r1:
             fr_class = int(st.selectbox("FR Class", options=[3,4], index=1 if state["surcharges"]["frClass"]==4 else 0, key="calc_fr_class"))
         with r2:
-            fr_km = st.number_input("FR toll km", value=state["surcharges"]["frKm"], step=10.0)
+            fr_km = st.number_input("FR toll km", value=state["surcharges"]["frKm"], step=10.0, key="calc_fr_km")
         with r3:
-            fr_c3 = st.number_input("€/km Class 3", value=state["surcharges"]["frEurPerKmClass3"], step=0.01)
+            fr_c3 = st.number_input("€/km Class 3", value=state["surcharges"]["frEurPerKmClass3"], step=0.01, key="calc_fr_c3")
         with r4:
-            fr_c4 = st.number_input("€/km Class 4", value=state["surcharges"]["frEurPerKmClass4"], step=0.01)
+            fr_c4 = st.number_input("€/km Class 4", value=state["surcharges"]["frEurPerKmClass4"], step=0.01, key="calc_fr_c4")
         with r5:
-            fr_special = st.number_input("Special €", value=state["surcharges"]["frSpecialEUR"], step=1.0)
-        include_fr = st.checkbox("Include FR in Flat", value=state["surcharges"]["includeFRinFlat"])
+            fr_special = st.number_input("Special €", value=state["surcharges"]["frSpecialEUR"], step=1.0, key="calc_fr_special")
+        include_fr = st.checkbox("Include FR in Flat", value=state["surcharges"]["includeFRinFlat"], key="calc_fr_include")
 
         per_km = fr_c3 if fr_class == 3 else fr_c4
         fr_fee = fr_km * per_km + fr_special
 
-        percent_eur = base[1] * ( (s_local["fuelPct"] or 0) + (s_local["marpolPct"] or 0) + (s_local["extraPct"] or 0) )
+        percent_eur = base[1] * ((s_local["fuelPct"] or 0) + (s_local["marpolPct"] or 0) + (s_local["extraPct"] or 0))
         per_ldm_eur = ldm_val * (s_local["perLdmEUR"] or 0)
         per_kg_eur = chargeable_kg * (s_local["perKgEUR"] or 0)
         flat_eur = (s_local["flatEUR"] or 0) + (fr_fee if include_fr else 0)
@@ -320,10 +331,10 @@ with tabs[0]:
         st.markdown("### Totals")
         t1, t2 = st.columns(2)
         with t1:
-            st.write(pd.DataFrame({
+            st.dataframe(pd.DataFrame({
                 "component": ["base", "percent", "per LDM", "per kg", "flat (incl FR)"],
                 "EUR": [base[1], percent_eur, per_ldm_eur, per_kg_eur, flat_eur],
-            }).style.format({"EUR": "€ {:.2f}"}))
+            }).style.format({"EUR": "€ {:.2f}"}), use_container_width=True)
         with t2:
             st.metric("Total (rounded)", f"€ {total_rounded:.2f}", help=f"raw € {total_raw:.2f}")
 
@@ -332,24 +343,25 @@ with tabs[1]:
     st.subheader("LDM Scaler – from full truck price or from fitted model")
     col1, col2, col3, col4, col5 = st.columns(5)
     with col1:
-        mode = st.selectbox("Mode", options=["FROM_P13","FROM_FIT"], index=0)
+        mode = st.selectbox("Mode", options=["FROM_P13","FROM_FIT"], index=0, key="ldm_mode")
     with col2:
-        p13 = st.number_input("P13 (EUR)", value=2000.0, step=10.0)
+        p13 = st.number_input("P13 (EUR)", value=2000.0, step=10.0, key="ldm_p13")
     with col3:
         model_choice = st.selectbox("Model", options=["AUTO","POWER","EXP"], index=0, key="ldm_model_choice")
-    # Fit defaults based on lane SE->FR (you can change below)
-    lane = state["lanes"].get("SE->FR")
+
+    lane_for_fit = state["lanes"].get("SE->FR")
     rows_for_fit = [
         dict(breakToKg=float(r.get("breakToKg")), ratePerKg=float(r.get("ratePerKg")))
-        for r in lane.get("perKg", []) if clamp_number(r.get("breakToKg")) and clamp_number(r.get("ratePerKg"))
-    ] if lane else []
+        for r in (lane_for_fit.get("perKg", []) if lane_for_fit else [])
+        if clamp_number(r.get("breakToKg")) and clamp_number(r.get("ratePerKg"))
+    ]
     pow_fit = fit_power_model(rows_for_fit)
     exp_fit = fit_exp_model(rows_for_fit)
 
     with col4:
-        b = st.number_input("POWER: b", value=float(0 if math.isnan(pow_fit.get("b", float("nan"))) else pow_fit.get("b")), step=0.01, format="%.5f")
+        b = st.number_input("POWER: b", value=float(0 if math.isnan(pow_fit.get("b", float("nan"))) else pow_fit.get("b")), step=0.01, format="%.5f", key="ldm_b")
     with col5:
-        d = st.number_input("EXP: d", value=float(0 if math.isnan(exp_fit.get("d", float("nan"))) else exp_fit.get("d")), step=0.00001, format="%.6f")
+        d = st.number_input("EXP: d", value=float(0 if math.isnan(exp_fit.get("d", float("nan"))) else exp_fit.get("d")), step=0.00001, format="%.6f", key="ldm_d")
 
     kg_per_flm = state["settings"]["kgPerFLM"]
     kg13 = 13 * kg_per_flm
@@ -365,20 +377,18 @@ with tabs[1]:
             if chosen == "POWER":
                 price = p13 * ((L/13) ** (b + 1))
             else:
-                price = p13 * ((kgL / kg13) * math.exp(d * (kgL - kg13)))
+                price = p13 * ((kgL / kg13) * math.exp(d * (kgL - kg13))) if kg13 else float("nan")
         else:
             if chosen == "POWER":
                 if abs(b + 1) < 1e-12:
                     price = float("nan")
                 else:
-                    # scale-free; anchor by setting FTL to p13
                     rawL = (kgL ** (b + 1)) / (b + 1)
                     raw13 = (kg13 ** (b + 1)) / (b + 1)
                     price = p13 * (rawL / raw13)
             else:
                 if abs(d) < 1e-12:
-                    rawL = kgL
-                    raw13 = kg13
+                    rawL = kgL; raw13 = kg13
                 else:
                     rawL = (math.exp(d * kgL) - 1) / d
                     raw13 = (math.exp(d * kg13) - 1) / d
@@ -387,7 +397,7 @@ with tabs[1]:
 
     df_ldm = pd.DataFrame(ldm_rows)
     st.dataframe(df_ldm.style.format({"kg": "{:.0f}", "Price EUR": "€ {:.2f}"}), use_container_width=True)
-    st.download_button("Download LDM table (CSV)", data=df_ldm.to_csv(index=False), file_name="ldm_prices.csv")
+    st.download_button("Download LDM table (CSV)", data=df_ldm.to_csv(index=False), file_name="ldm_prices.csv", key="ldm_download")
 
 # ------------------------ Weight Scaler ------------------------
 with tabs[2]:
@@ -395,7 +405,7 @@ with tabs[2]:
 
     c1, c2, c3 = st.columns(3)
     with c1:
-        lane_id = st.text_input("Lane ID", value="SE->FR")
+        lane_id = st.text_input("Lane ID", value="SE->FR", key="weight_lane")
     with c2:
         model_sel = st.selectbox("Model", options=["AUTO","POWER","EXP"], index=0, key="weight_model_sel")
     with c3:
@@ -415,7 +425,7 @@ with tabs[2]:
         if chosen == "AUTO":
             chosen = "EXP" if (exp_fit.get("r2") or 0) >= (pow_fit.get("r2") or 0) else "POWER"
 
-        breaks_text = st.text_area("New breaks (kg), comma/space separated", value="500, 1000, 2000, 5000, 10000, 25160")
+        breaks_text = st.text_area("New breaks (kg), comma/space separated", value="500, 1000, 2000, 5000, 10000, 25160", key="weight_breaks")
         new_breaks = []
         for tok in [t.strip() for t in breaks_text.replace(";", ",").replace("\n", ",").split(",")]:
             n = clamp_number(tok)
@@ -453,7 +463,7 @@ with tabs[2]:
             if method == "INTEGRATED":
                 total = integral_to(brk) - integral_to(start)
             else:
-                total = r_break * width  # point approximation
+                total = r_break * width
             avg_eur_per_kg = total / width if width > 0 else float("nan")
             out_rows.append({
                 "BreakToKg": brk,
@@ -474,25 +484,24 @@ with tabs[2]:
             "Band Total €": "€ {:.2f}",
             "Avg €/kg": "{:.4f}",
         }), use_container_width=True)
-        st.download_button("Download new ladder (CSV)", data=df_out.to_csv(index=False), file_name=f"{lane_id.replace('>','-')}-retiered.csv")
+        st.download_button("Download new ladder (CSV)", data=df_out.to_csv(index=False), file_name=f"{lane_id.replace('>','-')}-retiered.csv", key="weight_download")
 
-# ------------------------ Admin ------------------------
 # ------------------------ Containers Scaler ------------------------
 with tabs[3]:
     st.subheader("Containers – scale 1–19 from FTL (20 containers)")
     col1, col2, col3, col4, col5, col6 = st.columns(6)
     with col1:
-        p20 = st.number_input("FTL = 20 containers (EUR)", value=2000.0, step=10.0)
+        p20 = st.number_input("FTL = 20 containers (EUR)", value=2000.0, step=10.0, key="cont_p20")
     with col2:
         model_choice = st.selectbox("Model", options=["POWER","EXP","AUTO"], index=0, key="containers_model_choice")
     with col3:
-        b_cont = st.number_input("POWER: b", value=-0.25, step=0.01, format="%.5f")
+        b_cont = st.number_input("POWER: b", value=-0.25, step=0.01, format="%.5f", key="cont_b")
     with col4:
-        d_cont = st.number_input("EXP: d", value=-0.00002, step=0.00001, format="%.6f")
+        d_cont = st.number_input("EXP: d", value=-0.00002, step=0.00001, format="%.6f", key="cont_d")
     with col5:
-        kg_per_container = st.number_input("kg per Container", value=float(state["settings"].get("kgPerContainer", 1000.0)), step=10.0)
+        kg_per_container = st.number_input("kg per Container", value=float(state["settings"].get("kgPerContainer", 1000.0)), step=10.0, key="cont_kg")
     with col6:
-        rounding_step = st.number_input("Rounding step €", value=state["settings"].get("roundingStep", 1.0), step=1.0)
+        rounding_step = st.number_input("Rounding step €", value=state["settings"].get("roundingStep", 1.0), step=1.0, key="cont_round")
 
     kg20 = 20 * kg_per_container
     chosen = model_choice if model_choice != "AUTO" else "POWER"
@@ -512,7 +521,6 @@ with tabs[3]:
             "Rounded EUR": rounded,
             "EUR/container": price / n if n>0 else float("nan"),
         })
-    # Add FTL row
     rows.append({
         "Containers": 20,
         "kg (est)": kg20,
@@ -528,7 +536,7 @@ with tabs[3]:
         "Rounded EUR": "€ {:.2f}",
         "EUR/container": "€ {:.2f}"
     }), use_container_width=True)
-    st.download_button("Download container table (CSV)", data=df_cont.to_csv(index=False), file_name="container_prices.csv")
+    st.download_button("Download container table (CSV)", data=df_cont.to_csv(index=False), file_name="container_prices.csv", key="cont_download")
 
 # ------------------------ Admin ------------------------
 with tabs[4]:
@@ -538,19 +546,19 @@ with tabs[4]:
     lane_ids = sorted(state["lanes"].keys())
     col1, col2, col3 = st.columns([2,1,1])
     with col1:
-        selected_lane = st.selectbox("Select lane", options=lane_ids, index=0 if lane_ids else None)
+        selected_lane = st.selectbox("Select lane", options=lane_ids, index=0 if lane_ids else None, key="admin_select_lane")
     with col2:
-        new_from = st.text_input("New lane: origin", value="SE")
+        new_from = st.text_input("New lane: origin", value="SE", key="admin_new_from")
     with col3:
-        new_to = st.text_input("New lane: dest", value="FR")
+        new_to = st.text_input("New lane: dest", value="FR", key="admin_new_to")
 
-    if st.button("Add lane"):
-        lane_id = f"{new_from}->{new_to}"
-        if lane_id in state["lanes"]:
+    if st.button("Add lane", key="admin_add_lane"):
+        new_id = f"{new_from}->{new_to}"
+        if new_id in state["lanes"]:
             st.warning("Lane already exists.")
         else:
-            state["lanes"][lane_id] = {"perKg": [], "perPallet": {"rate": 0, "min": 0}, "perFLM": {"rate": 0, "min": 0}}
-            st.success(f"Added {lane_id}")
+            state["lanes"][new_id] = {"perKg": [], "perPallet": {"rate": 0, "min": 0}, "perFLM": {"rate": 0, "min": 0}}
+            st.success(f"Added {new_id}")
 
     if selected_lane:
         lane = state["lanes"][selected_lane]
@@ -559,8 +567,7 @@ with tabs[4]:
         with c1:
             st.write("Per-kg ladder (breaks ascending)")
             df = pd.DataFrame(lane.get("perKg", []))
-            df = st.data_editor(df, num_rows="dynamic", use_container_width=True, key=f"edit_{selected_lane}")
-            # Save back
+            df = st.data_editor(df, num_rows="dynamic", use_container_width=True, key=f"edit_perkg_{selected_lane}")
             lane["perKg"] = [
                 {"breakToKg": clamp_number(r.get("breakToKg")) or 0,
                  "ratePerKg": clamp_number(r.get("ratePerKg")) or 0,
@@ -570,14 +577,17 @@ with tabs[4]:
         with c2:
             st.write("Per pallet")
             lane.setdefault("perPallet", {})
-            lane["perPallet"]["rate"] = st.number_input("€/pallet", value=float(lane["perPallet"].get("rate", 0)), step=1.0)
-            lane["perPallet"]["min"] = st.number_input("Min € (pallet)", value=float(lane["perPallet"].get("min", 0)), step=1.0)
+            lane["perPallet"]["rate"] = st.number_input("€/pallet", value=float(lane["perPallet"].get("rate", 0)), step=1.0, key="admin_perpallet_rate")
+            lane["perPallet"]["min"]  = st.number_input("Min € (pallet)", value=float(lane["perPallet"].get("min", 0)), step=1.0, key="admin_perpallet_min")
             st.write("Per FLM")
             lane.setdefault("perFLM", {})
-            lane["perFLM"]["rate"] = st.number_input("€/FLM", value=float(lane["perFLM"].get("rate", 0)), step=1.0)
-            lane["perFLM"]["min"] = st.number_input("Min € (FLM)", value=float(lane["perFLM"].get("min", 0)), step=1.0)
+            lane["perFLM"]["rate"] = st.number_input("€/FLM", value=float(lane["perFLM"].get("rate", 0)), step=1.0, key="admin_perflm_rate")
+            lane["perFLM"]["min"]  = st.number_input("Min € (FLM)", value=float(lane["perFLM"].get("min", 0)), step=1.0, key="admin_perflm_min")
 
     st.divider()
-    if st.button("Reset to defaults"):
+    if st.button("Reset to defaults", key="admin_reset_btn"):
         st.session_state.app_state = DEFAULT_STATE
-        st.experimental_rerun()
+        try:
+            st.rerun()
+        except Exception:
+            st.experimental_rerun()
