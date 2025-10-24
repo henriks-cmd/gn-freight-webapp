@@ -15,6 +15,7 @@
 
 import json
 import math
+import re
 from typing import List, Dict, Tuple
 
 import numpy as np
@@ -22,7 +23,8 @@ import pandas as pd
 import streamlit as st
 
 st.set_page_config(page_title="GN Freight WebApp", layout="wide")
-__version__ = "2025-10-24.1"
+__version__ = "2025-10-24.2"  # bump this when pushing new release
+
 # ------------------------ Helpers ------------------------
 
 def clamp_number(v):
@@ -157,7 +159,6 @@ if "app_state" not in st.session_state:
     st.session_state.app_state = DEFAULT_STATE
 
 state = st.session_state.app_state
-# Backwards-compat for older sessions
 state["settings"].setdefault("kgPerContainer", 1000.0)
 
 # ------------------------ Sidebar ------------------------
@@ -272,7 +273,7 @@ with tabs[0]:
         c3.metric("Per FLM", f"€ {total_flm:.2f}")
         c4.metric("Chosen", f"{base[0]} → € {base[1]:.2f}")
 
-        # Fit from ladder
+        # fit from ladder
         rows_for_fit = [
             dict(breakToKg=float(r.get("breakToKg")), ratePerKg=float(r.get("ratePerKg")))
             for r in lane.get("perKg", []) if clamp_number(r.get("breakToKg")) and clamp_number(r.get("ratePerKg"))
@@ -425,15 +426,22 @@ with tabs[2]:
         if chosen == "AUTO":
             chosen = "EXP" if (exp_fit.get("r2") or 0) >= (pow_fit.get("r2") or 0) else "POWER"
 
-        breaks_text = st.text_area("New breaks (kg), comma/space separated", value="500, 1000, 2000, 5000, 10000, 25160", key="weight_breaks")
-        new_breaks = []
-        for tok in [t.strip() for t in breaks_text.replace(";", ",").replace("\n", ",").split(",")]:
-            n = clamp_number(tok)
-            if n and n > 0:
-                new_breaks.append(float(n))
-        new_breaks = sorted(set(new_breaks))
+        # --- Optional anchor: normalize totals to a given price at a given weight ---
+        st.markdown("#### Optional anchor (normalize totals)")
+        a1, a2, a3 = st.columns(3)
+        with a1:
+            anchor_mode = st.selectbox("Anchor type", ["NONE","MATCH_TOTAL_AT_KG"], index=0, key="weight_anchor_mode")
+        with a2:
+            anchor_kg = st.number_input("Anchor weight (kg)", value=10000.0, step=50.0, key="weight_anchor_kg")
+        with a3:
+            anchor_total = st.number_input("Anchor total € at weight", value=0.0, step=10.0, key="weight_anchor_total")
 
-        def rate_at(kg: float) -> float:
+        breaks_text = st.text_area("New breaks (kg), comma/space separated", value="500, 1000, 2000, 5000, 10000, 25160", key="weight_breaks")
+        tokens = re.split(r'[,;\s]+', breaks_text.strip())
+        new_breaks = sorted({float(n) for n in (clamp_number(tok) for tok in tokens) if n and n > 0})
+
+        # --- Raw (unscaled) model functions ---
+        def rate_at_raw(kg: float) -> float:
             if chosen == "EXP":
                 A, d = exp_fit["A"], exp_fit["d"]
                 return (A or 0) * math.exp((d or 0) * kg)
@@ -441,7 +449,7 @@ with tabs[2]:
                 A, b = pow_fit["A"], pow_fit["b"]
                 return (A or 0) * (kg ** (b or 0))
 
-        def integral_to(kg: float) -> float:
+        def integral_to_raw(kg: float) -> float:
             if kg <= 0:
                 return 0.0
             if chosen == "EXP":
@@ -454,6 +462,20 @@ with tabs[2]:
                 if abs((b or 0) + 1) < 1e-12:
                     return (A or 0) * math.log(kg)
                 return (A / (b + 1)) * (kg ** (b + 1))
+
+        # --- Optional scaling from anchor ---
+        scale = 1.0
+        if anchor_mode == "MATCH_TOTAL_AT_KG" and (anchor_total or 0) > 0 and (anchor_kg or 0) > 0:
+            model_total = integral_to_raw(anchor_kg)
+            if model_total and model_total > 0:
+                scale = anchor_total / model_total
+        st.caption(f"Anchor scale factor: {scale:.6f}")
+
+        def rate_at(kg: float) -> float:
+            return scale * rate_at_raw(kg)
+
+        def integral_to(kg: float) -> float:
+            return scale * integral_to_raw(kg)
 
         out_rows = []
         start = 0.0
