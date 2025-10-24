@@ -1,4 +1,10 @@
 ## 2025-10-24 — v2025-10-24.5
+- Excel-export (V+H) på samtliga flikar: Calculator, LDM, Weight Scaler, Containers
+- Weight Scaler: Anchor (MATCH_TOTAL_AT_KG) + metodval INTEGRATED/POINT
+- Parser för nya viktbreaks (komma/semikolon/blanksteg)
+- Containers: 1–19 från FTL (=20)
+- Unika Streamlit keys (fix för DuplicateElementId)
+## 2025-10-24 — v2025-10-24.5
 - **Excel-export (V+H) på alla flikar**: Calculator, LDM, Weight Scaler, Containers
 - **Weight Scaler**: Anchor (MATCH_TOTAL_AT_KG) + metodval **INTEGRATED/POINT**
 - Robust parser för nya viktbreaks (komma/semikolon/blanksteg)
