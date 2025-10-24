@@ -23,7 +23,7 @@ import pandas as pd
 import streamlit as st
 
 st.set_page_config(page_title="GN Freight WebApp", layout="wide")
-__version__ = "2025-10-24.2"  # bump this when pushing new release
+__version__ = "2025-10-24.3"  # bump this when pushing new release
 
 # ------------------------ Helpers ------------------------
 
@@ -437,7 +437,7 @@ with tabs[2]:
             anchor_total = st.number_input("Anchor total € at weight", value=0.0, step=10.0, key="weight_anchor_total")
 
         breaks_text = st.text_area("New breaks (kg), comma/space separated", value="500, 1000, 2000, 5000, 10000, 25160", key="weight_breaks")
-        tokens = re.split(r'[,;\s]+', breaks_text.strip())
+        tokens = re.split(r"[,;\s]+", breaks_text.strip())
         new_breaks = sorted({float(n) for n in (clamp_number(tok) for tok in tokens) if n and n > 0})
 
         # --- Raw (unscaled) model functions ---
