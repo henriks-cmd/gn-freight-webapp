@@ -1,7 +1,7 @@
 # GN Freight WebApp – Streamlit MVP (single-file)
 # -------------------------------------------------------------
 # Run locally:
-#   pip install streamlit numpy pandas
+#   pip install streamlit numpy pandas xlsxwriter openpyxl
 #   streamlit run app.py
 #
 # Features:
@@ -9,10 +9,12 @@
 # - Curve fit: POWER & EXP from kg ladder (shows R²)
 # - Surcharges: fuel %, MARPOL %, extra %, per-LDM, per-kg, flat; FR roadfee helper
 # - LDM Scaler: 1–13 LDM from P13 (POWER/EXP) or from fitted model
-# - Weight Scaler: retier to new weight breaks (INTEGRATED exact / POINT approx)
+# - Weight Scaler: retier to new weight breaks (INTEGRATED exact / POINT approx) + Anchor
 # - Containers: scale 1–19 from FTL (=20 containers)
 # - Admin: manage lanes, settings, import/export JSON
+# - Excel export: **Vertical + Horizontal** layout on all tabs
 
+import io
 import json
 import math
 import re
@@ -23,7 +25,7 @@ import pandas as pd
 import streamlit as st
 
 st.set_page_config(page_title="GN Freight WebApp", layout="wide")
-__version__ = "2025-10-24.3"  # bump this when pushing new release
+__version__ = "2025-10-24.5"  # bump this when pushing new release
 
 # ------------------------ Helpers ------------------------
 
@@ -102,6 +104,20 @@ def price_from_ladder(weight_kg: float, ladder: List[Dict]):
     total = max(weight_kg * rate, min_eur)
     return dict(total=total, rate=rate, min=min_eur, row=chosen)
 
+
+def to_excel_bytes(sheets: Dict[str, pd.DataFrame]) -> bytes:
+    """Write multiple DataFrames to an in-memory .xlsx (tries xlsxwriter then openpyxl)."""
+    last_err = None
+    for eng in ("xlsxwriter", "openpyxl"):
+        try:
+            buf = io.BytesIO()
+            with pd.ExcelWriter(buf, engine=eng) as w:
+                for name, df in sheets.items():
+                    df.to_excel(w, sheet_name=name, index=False)
+            return buf.getvalue()
+        except Exception as e:
+            last_err = e
+    raise RuntimeError(f"Excel export needs xlsxwriter or openpyxl. Last error: {last_err}")
 
 # ------------------------ Defaults & State ------------------------
 
@@ -332,12 +348,64 @@ with tabs[0]:
         st.markdown("### Totals")
         t1, t2 = st.columns(2)
         with t1:
-            st.dataframe(pd.DataFrame({
-                "component": ["base", "percent", "per LDM", "per kg", "flat (incl FR)"],
-                "EUR": [base[1], percent_eur, per_ldm_eur, per_kg_eur, flat_eur],
-            }).style.format({"EUR": "€ {:.2f}"}), use_container_width=True)
+            df_totals = pd.DataFrame({
+                "component": ["base", "percent", "per LDM", "per kg", "flat (incl FR)", "total_raw", "total_rounded"],
+                "EUR": [base[1], percent_eur, per_ldm_eur, per_kg_eur, flat_eur, total_raw, total_rounded],
+            })
+            st.dataframe(df_totals.style.format({"EUR": "€ {:.2f}"}), use_container_width=True)
         with t2:
             st.metric("Total (rounded)", f"€ {total_rounded:.2f}", help=f"raw € {total_raw:.2f}")
+
+        # -------- Export to Excel (Vertical + Horizontal) --------
+        st.markdown("#### Export")
+        # Vertical sheet
+        df_v = df_totals.copy()
+
+        # Horizontal sheet (one row)
+        df_h = pd.DataFrame([{
+            "lane": lane_id,
+            "origin": origin,
+            "dest": dest,
+            "pallets": pallets,
+            "ldm": ldm_val,
+            "weight_kg": weight,
+            "tariff_chosen": base[0],
+            "per_kg": perkg["total"],
+            "per_pallet": total_pal,
+            "per_flm": total_flm,
+            "base": base[1],
+            "percent": percent_eur,
+            "per_LDM": per_ldm_eur,
+            "per_kg_add": per_kg_eur,
+            "flat_incl_FR": flat_eur,
+            "total_raw": total_raw,
+            "total_rounded": total_rounded,
+        }])
+
+        df_ctx = pd.DataFrame([
+            ["Lane", lane_id],
+            ["Origin", origin],
+            ["Destination", dest],
+            ["Pallets", pallets],
+            ["LDM", ldm_val],
+            ["Weight (kg)", weight],
+            ["kg/FLM", kg_per_flm],
+            ["FLM/pallet", flm_per_pallet],
+            ["Tariff chosen", base[0]],
+            ["Model (best R²)", chosen_model],
+        ], columns=["key", "value"])
+
+        try:
+            xlsx = to_excel_bytes({"Totals_V": df_v, "Totals_H": df_h, "Context": df_ctx})
+            st.download_button(
+                "Export to Excel (V+H)",
+                data=xlsx,
+                file_name="calculator_totals.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="calc_export_xlsx",
+            )
+        except Exception as e:
+            st.error(str(e))
 
 # ------------------------ LDM Scaler ------------------------
 with tabs[1]:
@@ -398,7 +466,27 @@ with tabs[1]:
 
     df_ldm = pd.DataFrame(ldm_rows)
     st.dataframe(df_ldm.style.format({"kg": "{:.0f}", "Price EUR": "€ {:.2f}"}), use_container_width=True)
-    st.download_button("Download LDM table (CSV)", data=df_ldm.to_csv(index=False), file_name="ldm_prices.csv", key="ldm_download")
+
+    # -------- Export (V+H) --------
+    # Vertical
+    df_v = df_ldm.copy()
+    # Horizontal: en rad med LDM_1 ... LDM_13
+    row = {"kg_per_flm": kg_per_flm, "mode": mode, "model": chosen, "p13": p13, "b": b, "d": d}
+    for _, r in df_ldm.iterrows():
+        row[f"LDM_{int(r['LDM'])}"] = r["Price EUR"]
+    df_h = pd.DataFrame([row])
+
+    try:
+        xlsx = to_excel_bytes({"LDM_V": df_v, "LDM_H": df_h})
+        st.download_button(
+            "Export LDM (V+H)",
+            data=xlsx,
+            file_name="ldm_scaler.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="ldm_export_xlsx",
+        )
+    except Exception as e:
+        st.error(str(e))
 
 # ------------------------ Weight Scaler ------------------------
 with tabs[2]:
@@ -436,7 +524,11 @@ with tabs[2]:
         with a3:
             anchor_total = st.number_input("Anchor total € at weight", value=0.0, step=10.0, key="weight_anchor_total")
 
-        breaks_text = st.text_area("New breaks (kg), comma/space separated", value="500, 1000, 2000, 5000, 10000, 25160", key="weight_breaks")
+        breaks_text = st.text_area(
+            "New breaks (kg), comma/semicolon/space separated",
+            value="500, 1000, 2000, 5000, 10000, 25160",
+            key="weight_breaks"
+        )
         tokens = re.split(r"[,;\s]+", breaks_text.strip())
         new_breaks = sorted({float(n) for n in (clamp_number(tok) for tok in tokens) if n and n > 0})
 
@@ -506,7 +598,36 @@ with tabs[2]:
             "Band Total €": "€ {:.2f}",
             "Avg €/kg": "{:.4f}",
         }), use_container_width=True)
-        st.download_button("Download new ladder (CSV)", data=df_out.to_csv(index=False), file_name=f"{lane_id.replace('>','-')}-retiered.csv", key="weight_download")
+
+        # -------- Export (V+H) --------
+        df_v = df_out.copy()
+
+        # Horizontal rad: kolumner för bandens totals (och optional rate/avg)
+        row = {
+            "lane": lane_id,
+            "model": chosen,
+            "method": method,
+            "anchor_mode": anchor_mode,
+            "anchor_kg": anchor_kg,
+            "anchor_total": anchor_total,
+            "scale": scale,
+        }
+        for _, r in df_out.iterrows():
+            brk = int(r["BreakToKg"])
+            row[f"Band_≤{brk}_Total€"] = r["Band Total €"]
+        df_h = pd.DataFrame([row])
+
+        try:
+            xlsx = to_excel_bytes({"Retier_V": df_v, "Retier_H": df_h})
+            st.download_button(
+                "Export Weight Scaler (V+H)",
+                data=xlsx,
+                file_name="weight_scaler.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="weight_export_xlsx",
+            )
+        except Exception as e:
+            st.error(str(e))
 
 # ------------------------ Containers Scaler ------------------------
 with tabs[3]:
@@ -558,7 +679,34 @@ with tabs[3]:
         "Rounded EUR": "€ {:.2f}",
         "EUR/container": "€ {:.2f}"
     }), use_container_width=True)
-    st.download_button("Download container table (CSV)", data=df_cont.to_csv(index=False), file_name="container_prices.csv", key="cont_download")
+
+    # -------- Export (V+H) --------
+    df_v = df_cont.copy()
+    row = {
+        "kg_per_container": kg_per_container,
+        "model": chosen,
+        "p20": p20,
+        "b": b_cont,
+        "d": d_cont,
+        "rounding_step": rounding_step,
+    }
+    for _, r in df_cont.iterrows():
+        n = int(r["Containers"])
+        row[f"N{n}_Total€"] = r["Total EUR"]
+        row[f"N{n}_Rounded€"] = r["Rounded EUR"]
+    df_h = pd.DataFrame([row])
+
+    try:
+        xlsx = to_excel_bytes({"Containers_V": df_v, "Containers_H": df_h})
+        st.download_button(
+            "Export Containers (V+H)",
+            data=xlsx,
+            file_name="containers_scaler.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="cont_export_xlsx",
+        )
+    except Exception as e:
+        st.error(str(e))
 
 # ------------------------ Admin ------------------------
 with tabs[4]:
