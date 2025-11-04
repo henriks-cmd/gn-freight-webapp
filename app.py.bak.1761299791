@@ -1,7 +1,7 @@
 # GN Freight WebApp – Streamlit MVP (single-file)
 # -------------------------------------------------------------
 # Run locally:
-#   pip install streamlit numpy pandas XlsxWriter openpyxl
+#   pip install streamlit numpy pandas
 #   streamlit run app.py
 #
 # Features:
@@ -9,13 +9,10 @@
 # - Curve fit: POWER & EXP from kg ladder (shows R²)
 # - Surcharges: fuel %, MARPOL %, extra %, per-LDM, per-kg, flat; FR roadfee helper
 # - LDM Scaler: 1–13 LDM from P13 (POWER/EXP) or from fitted model
-# - Weight Scaler: retier to new weight breaks (INTEGRATED exact / POINT approx) + Anchor
+# - Weight Scaler: retier to new weight breaks (INTEGRATED exact / POINT approx)
 # - Containers: scale 1–19 from FTL (=20 containers)
-# - Pallet Scaler: from FTL pallets+price → per pallet (1..N) via model OR bands (intervals), with EUR/SEK toggle
 # - Admin: manage lanes, settings, import/export JSON
-# - Excel export: Vertical + Horizontal sheets on relevant tabs
 
-import io
 import json
 import math
 import re
@@ -26,7 +23,7 @@ import pandas as pd
 import streamlit as st
 
 st.set_page_config(page_title="GN Freight WebApp", layout="wide")
-__version__ = "2025-11-04.1"  # bump on release
+__version__ = "2025-10-24.3"  # bump this when pushing new release
 
 # ------------------------ Helpers ------------------------
 
@@ -105,20 +102,6 @@ def price_from_ladder(weight_kg: float, ladder: List[Dict]):
     total = max(weight_kg * rate, min_eur)
     return dict(total=total, rate=rate, min=min_eur, row=chosen)
 
-
-def to_excel_bytes(sheets: Dict[str, pd.DataFrame]) -> bytes:
-    """Write multiple DataFrames to an in-memory .xlsx (tries xlsxwriter then openpyxl)."""
-    last_err = None
-    for eng in ("xlsxwriter", "openpyxl"):
-        try:
-            buf = io.BytesIO()
-            with pd.ExcelWriter(buf, engine=eng) as w:
-                for name, df in sheets.items():
-                    df.to_excel(w, sheet_name=name, index=False)
-            return buf.getvalue()
-        except Exception as e:
-            last_err = e
-    raise RuntimeError(f"Excel export needs xlsxwriter or openpyxl. Last error: {last_err}")
 
 # ------------------------ Defaults & State ------------------------
 
@@ -225,7 +208,8 @@ with st.sidebar.expander("Data: lanes import/export", expanded=False):
             st.error(f"Failed to load: {e}")
 
 # ------------------------ Tabs ------------------------
-tabs = st.tabs(["Calculator", "LDM Scaler", "Weight Scaler", "Containers", "Pallet Scaler", "Admin"])
+
+tabs = st.tabs(["Calculator", "LDM Scaler", "Weight Scaler", "Containers", "Admin"])
 
 # ------------------------ Calculator ------------------------
 with tabs[0]:
@@ -289,6 +273,7 @@ with tabs[0]:
         c3.metric("Per FLM", f"€ {total_flm:.2f}")
         c4.metric("Chosen", f"{base[0]} → € {base[1]:.2f}")
 
+        # fit from ladder
         rows_for_fit = [
             dict(breakToKg=float(r.get("breakToKg")), ratePerKg=float(r.get("ratePerKg")))
             for r in lane.get("perKg", []) if clamp_number(r.get("breakToKg")) and clamp_number(r.get("ratePerKg"))
@@ -347,46 +332,12 @@ with tabs[0]:
         st.markdown("### Totals")
         t1, t2 = st.columns(2)
         with t1:
-            df_totals = pd.DataFrame({
-                "component": ["base", "percent", "per LDM", "per kg", "flat (incl FR)", "total_raw", "total_rounded"],
-                "EUR": [base[1], percent_eur, per_ldm_eur, per_kg_eur, flat_eur, total_raw, total_rounded],
-            })
-            st.dataframe(df_totals.style.format({"EUR": "€ {:.2f}"}), use_container_width=True)
+            st.dataframe(pd.DataFrame({
+                "component": ["base", "percent", "per LDM", "per kg", "flat (incl FR)"],
+                "EUR": [base[1], percent_eur, per_ldm_eur, per_kg_eur, flat_eur],
+            }).style.format({"EUR": "€ {:.2f}"}), use_container_width=True)
         with t2:
             st.metric("Total (rounded)", f"€ {total_rounded:.2f}", help=f"raw € {total_raw:.2f}")
-
-        st.markdown("#### Export")
-        df_v = df_totals.copy()
-        df_h = pd.DataFrame([{
-            "lane": lane_id,
-            "origin": origin,
-            "dest": dest,
-            "pallets": pallets,
-            "ldm": ldm_val,
-            "weight_kg": weight,
-            "tariff_chosen": base[0],
-            "per_kg": perkg["total"],
-            "per_pallet": total_pal,
-            "per_flm": total_flm,
-            "base": base[1],
-            "percent": percent_eur,
-            "per_LDM": per_ldm_eur,
-            "per_kg_add": per_kg_eur,
-            "flat_incl_FR": flat_eur,
-            "total_raw": total_raw,
-            "total_rounded": total_rounded,
-        }])
-        try:
-            xlsx = to_excel_bytes({"Totals_V": df_v, "Totals_H": df_h})
-            st.download_button(
-                "Export to Excel (V+H)",
-                data=xlsx,
-                file_name="calculator_totals.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="calc_export_xlsx",
-            )
-        except Exception as e:
-            st.error(str(e))
 
 # ------------------------ LDM Scaler ------------------------
 with tabs[1]:
@@ -447,24 +398,7 @@ with tabs[1]:
 
     df_ldm = pd.DataFrame(ldm_rows)
     st.dataframe(df_ldm.style.format({"kg": "{:.0f}", "Price EUR": "€ {:.2f}"}), use_container_width=True)
-
-    df_v = df_ldm.copy()
-    row = {"kg_per_flm": kg_per_flm, "mode": mode, "model": chosen, "p13": p13, "b": b, "d": d}
-    for _, r in df_ldm.iterrows():
-        row[f"LDM_{int(r['LDM'])}"] = r["Price EUR"]
-    df_h = pd.DataFrame([row])
-
-    try:
-        xlsx = to_excel_bytes({"LDM_V": df_v, "LDM_H": df_h})
-        st.download_button(
-            "Export LDM (V+H)",
-            data=xlsx,
-            file_name="ldm_scaler.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="ldm_export_xlsx",
-        )
-    except Exception as e:
-        st.error(str(e))
+    st.download_button("Download LDM table (CSV)", data=df_ldm.to_csv(index=False), file_name="ldm_prices.csv", key="ldm_download")
 
 # ------------------------ Weight Scaler ------------------------
 with tabs[2]:
@@ -492,6 +426,7 @@ with tabs[2]:
         if chosen == "AUTO":
             chosen = "EXP" if (exp_fit.get("r2") or 0) >= (pow_fit.get("r2") or 0) else "POWER"
 
+        # --- Optional anchor: normalize totals to a given price at a given weight ---
         st.markdown("#### Optional anchor (normalize totals)")
         a1, a2, a3 = st.columns(3)
         with a1:
@@ -501,14 +436,11 @@ with tabs[2]:
         with a3:
             anchor_total = st.number_input("Anchor total € at weight", value=0.0, step=10.0, key="weight_anchor_total")
 
-        breaks_text = st.text_area(
-            "New breaks (kg), comma/semicolon/space separated",
-            value="500, 1000, 2000, 5000, 10000, 25160",
-            key="weight_breaks"
-        )
+        breaks_text = st.text_area("New breaks (kg), comma/space separated", value="500, 1000, 2000, 5000, 10000, 25160", key="weight_breaks")
         tokens = re.split(r"[,;\s]+", breaks_text.strip())
         new_breaks = sorted({float(n) for n in (clamp_number(tok) for tok in tokens) if n and n > 0})
 
+        # --- Raw (unscaled) model functions ---
         def rate_at_raw(kg: float) -> float:
             if chosen == "EXP":
                 A, d = exp_fit["A"], exp_fit["d"]
@@ -531,6 +463,7 @@ with tabs[2]:
                     return (A or 0) * math.log(kg)
                 return (A / (b + 1)) * (kg ** (b + 1))
 
+        # --- Optional scaling from anchor ---
         scale = 1.0
         if anchor_mode == "MATCH_TOTAL_AT_KG" and (anchor_total or 0) > 0 and (anchor_kg or 0) > 0:
             model_total = integral_to_raw(anchor_kg)
@@ -573,33 +506,7 @@ with tabs[2]:
             "Band Total €": "€ {:.2f}",
             "Avg €/kg": "{:.4f}",
         }), use_container_width=True)
-
-        df_v = df_out.copy()
-        row = {
-            "lane": lane_id,
-            "model": chosen,
-            "method": method,
-            "anchor_mode": anchor_mode,
-            "anchor_kg": anchor_kg,
-            "anchor_total": anchor_total,
-            "scale": scale,
-        }
-        for _, r in df_out.iterrows():
-            brk = int(r["BreakToKg"])
-            row[f"Band_≤{brk}_Total€"] = r["Band Total €"]
-        df_h = pd.DataFrame([row])
-
-        try:
-            xlsx = to_excel_bytes({"Retier_V": df_v, "Retier_H": df_h})
-            st.download_button(
-                "Export Weight Scaler (V+H)",
-                data=xlsx,
-                file_name="weight_scaler.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="weight_export_xlsx",
-            )
-        except Exception as e:
-            st.error(str(e))
+        st.download_button("Download new ladder (CSV)", data=df_out.to_csv(index=False), file_name=f"{lane_id.replace('>','-')}-retiered.csv", key="weight_download")
 
 # ------------------------ Containers Scaler ------------------------
 with tabs[3]:
@@ -651,242 +558,10 @@ with tabs[3]:
         "Rounded EUR": "€ {:.2f}",
         "EUR/container": "€ {:.2f}"
     }), use_container_width=True)
-
-    df_v = df_cont.copy()
-    row = {
-        "kg_per_container": kg_per_container,
-        "model": chosen,
-        "p20": p20,
-        "b": b_cont,
-        "d": d_cont,
-        "rounding_step": rounding_step,
-    }
-    for _, r in df_cont.iterrows():
-        n = int(r["Containers"])
-        row[f"N{n}_Total€"] = r["Total EUR"]
-        row[f"N{n}_Rounded€"] = r["Rounded EUR"]
-    df_h = pd.DataFrame([row])
-
-    try:
-        xlsx = to_excel_bytes({"Containers_V": df_v, "Containers_H": df_h})
-        st.download_button(
-            "Export Containers (V+H)",
-            data=xlsx,
-            file_name="containers_scaler.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="cont_export_xlsx",
-        )
-    except Exception as e:
-        st.error(str(e))
-
-# ------------------------ Pallet Scaler (NEW) ------------------------
-with tabs[4]:
-    st.subheader("Pallet Scaler – from FTL pallets + price")
-
-    # --- Currency block (only for this tab for now) ---
-    c0, c1, c2, c3 = st.columns([1.2, 1, 1, 1])
-    with c0:
-        currency = st.selectbox("Currency", options=["EUR","SEK"], index=0, key="pallet_currency")
-    with c1:
-        fx = st.number_input("EUR→SEK", value=11.00, step=0.10, format="%.2f", key="pallet_fx")
-    with c2:
-        rounding_step_disp = st.number_input("Rounding step (in chosen currency)", value=1.0, step=1.0, key="pallet_round_step")
-    with c3:
-        mode = st.selectbox("Mode", options=["MODEL","BANDS"], index=0, key="pallet_mode")
-
-    def to_eur(amount_in_display: float) -> float:
-        if currency == "EUR":
-            return amount_in_display or 0.0
-        return (amount_in_display or 0.0) / (fx or 1.0)
-
-    def to_disp(amount_eur: float) -> float:
-        if currency == "EUR":
-            return amount_eur or 0.0
-        return (amount_eur or 0.0) * (fx or 1.0)
-
-    sym = "€" if currency == "EUR" else "kr"
-
-    # --- Baseline (FTL) ---
-    b1, b2 = st.columns(2)
-    with b1:
-        ftl_pallets = int(st.number_input("FTL pallets (e.g. 33 or 34)", value=34, step=1, min_value=1, max_value=120, key="pallet_ftl_count"))
-    with b2:
-        ftl_price_disp = st.number_input(f"FTL total ({sym})", value=2000.0 if currency=="EUR" else 2000.0*fx, step=10.0, key="pallet_ftl_price")
-    ftl_price_eur = to_eur(ftl_price_disp)
-
-    if mode == "MODEL":
-        m1, m2, m3, m4 = st.columns(4)
-        with m1:
-            model_choice = st.selectbox("Model", options=["AUTO","POWER","EXP"], index=0, key="pallet_model_choice")
-        with m2:
-            b_par = st.number_input("POWER: b", value=-0.25, step=0.01, format="%.5f", key="pallet_power_b")
-        with m3:
-            d_par = st.number_input("EXP: d", value=-0.00002, step=0.00001, format="%.6f", key="pallet_exp_d")
-        with m4:
-            ensure_match_ftl = st.checkbox("Normalize so N=FTL equals FTL total", value=True, key="pallet_norm_to_ftl")
-
-        chosen = model_choice
-        if chosen == "AUTO":
-            # Default to POWER unless user prefers EXP
-            chosen = "POWER"
-
-        rows = []
-        for n in range(1, ftl_pallets + 1):
-            if chosen == "POWER":
-                total_eur = ftl_price_eur * ((n / ftl_pallets) ** (b_par + 1))
-            else:
-                # EXP using counts (analogous to LDM/Containers approach)
-                if ftl_pallets > 0:
-                    total_eur = ftl_price_eur * ((n / ftl_pallets) * math.exp(d_par * (n - ftl_pallets)))
-                else:
-                    total_eur = float("nan")
-            rows.append({"Pallets": n, "Total (EUR)": total_eur})
-
-        df = pd.DataFrame(rows)
-        if ensure_match_ftl and ftl_pallets > 0:
-            # Scale so that last row equals exactly FTL price
-            last = df.loc[df["Pallets"] == ftl_pallets, "Total (EUR)"].values
-            if len(last) and last[0] not in (None, 0, float("nan")):
-                scale = ftl_price_eur / last[0] if last[0] else 1.0
-                df["Total (EUR)"] = df["Total (EUR)"] * scale
-
-        df["Total (disp)"] = df["Total (EUR)"].apply(to_disp)
-        df["Rounded (disp)"] = df["Total (disp)"].apply(lambda x: round_to_step(x, rounding_step_disp))
-        df[f"{sym}/pallet (rounded)"] = df.apply(lambda r: (r["Rounded (disp)"] / r["Pallets"]) if r["Pallets"]>0 else float("nan"), axis=1)
-
-        st.dataframe(
-            df[["Pallets","Total (disp)","Rounded (disp)",f"{sym}/pallet (rounded)"]].rename(
-                columns={"Total (disp)": f"Total ({sym})", "Rounded (disp)": f"Rounded ({sym})"}
-            ).style.format({f"Total ({sym})": f"{sym} "+"{:.2f}", f"Rounded ({sym})": f"{sym} "+"{:.2f}", f"{sym}/pallet (rounded)": f"{sym} "+"{:.2f}"}),
-            use_container_width=True
-        )
-
-        # Export V+H
-        df_v = df[["Pallets","Total (EUR)","Total (disp)","Rounded (disp)",f"{sym}/pallet (rounded)"]].rename(
-            columns={"Total (disp)": f"Total ({sym})", "Rounded (disp)": f"Rounded ({sym})"}
-        ).copy()
-
-        row = {
-            "currency": currency,
-            "fx_EUR_to_SEK": fx,
-            "round_step_disp": rounding_step_disp,
-            "ftl_pallets": ftl_pallets,
-            "ftl_total_disp": ftl_price_disp,
-            "model": chosen,
-            "b": b_par,
-            "d": d_par,
-        }
-        for _, r in df.iterrows():
-            n = int(r["Pallets"])
-            row[f"N{n}_Rounded({sym})"] = r["Rounded (disp)"]
-        df_h = pd.DataFrame([row])
-
-        try:
-            xlsx = to_excel_bytes({"Pallet_V": df_v, "Pallet_H": df_h})
-            st.download_button(
-                "Export Pallet Scaler (V+H)",
-                data=xlsx,
-                file_name="pallet_scaler.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="pallet_export_xlsx",
-            )
-        except Exception as e:
-            st.error(str(e))
-
-    else:
-        st.markdown("#### Bands (intervals)")
-        st.caption("Exempel: 1–3 pall = X/pall, 4–6 = Y/pall, etc. Du anger priser i vald valuta.")
-
-        # Default bands proposal
-        default_bands = pd.DataFrame([
-            {"From": 1, "To": 3, "Rate_per_pallet": 150 if currency=="EUR" else 150*fx, "Min_total": 0},
-            {"From": 4, "To": 6, "Rate_per_pallet": 120 if currency=="EUR" else 120*fx, "Min_total": 0},
-            {"From": 7, "To": 10, "Rate_per_pallet": 100 if currency=="EUR" else 100*fx, "Min_total": 0},
-            {"From": 11, "To": 34, "Rate_per_pallet": 90 if currency=="EUR" else 90*fx, "Min_total": 0},
-        ])
-
-        df_bands = st.data_editor(
-            default_bands,
-            num_rows="dynamic",
-            use_container_width=True,
-            key="pallet_bands_editor"
-        )
-
-        normalize_to_ftl = st.checkbox("Normalize totals so N=FTL equals FTL total", value=True, key="pallet_bands_norm")
-
-        # Build per-count table from bands
-        def band_for_n(n: int):
-            for _, r in df_bands.iterrows():
-                f = int(clamp_number(r.get("From")) or 0)
-                t = int(clamp_number(r.get("To")) or 0)
-                if f <= n <= t:
-                    rate_disp = clamp_number(r.get("Rate_per_pallet")) or 0.0
-                    min_total_disp = clamp_number(r.get("Min_total")) or 0.0
-                    return rate_disp, min_total_disp
-            # If not found, try last row
-            if len(df_bands) > 0:
-                r = df_bands.iloc[-1]
-                rate_disp = clamp_number(r.get("Rate_per_pallet")) or 0.0
-                min_total_disp = clamp_number(r.get("Min_total")) or 0.0
-                return rate_disp, min_total_disp
-            return 0.0, 0.0
-
-        rows = []
-        for n in range(1, ftl_pallets + 1):
-            rate_disp, min_total_disp = band_for_n(n)
-            total_disp = max(rate_disp * n, min_total_disp)
-            rows.append({"Pallets": n, "Total_disp": total_disp})
-
-        df = pd.DataFrame(rows)
-
-        if normalize_to_ftl and ftl_pallets > 0:
-            last = df.loc[df["Pallets"] == ftl_pallets, "Total_disp"].values
-            if len(last) and last[0] not in (None, 0, float("nan")):
-                scale = (ftl_price_disp or 0.0) / last[0] if last[0] else 1.0
-                df["Total_disp"] = df["Total_disp"] * scale
-
-        df["Rounded_disp"] = df["Total_disp"].apply(lambda x: round_to_step(x, rounding_step_disp))
-        df[f"{sym}/pallet (rounded)"] = df.apply(lambda r: (r["Rounded_disp"] / r["Pallets"]) if r["Pallets"]>0 else float("nan"), axis=1)
-
-        st.dataframe(
-            df[["Pallets","Total_disp","Rounded_disp",f"{sym}/pallet (rounded)"]].rename(
-                columns={"Total_disp": f"Total ({sym})", "Rounded_disp": f"Rounded ({sym})"}
-            ).style.format({f"Total ({sym})": f"{sym} "+"{:.2f}", f"Rounded ({sym})": f"{sym} "+"{:.2f}", f"{sym}/pallet (rounded)": f"{sym} "+"{:.2f}"}),
-            use_container_width=True
-        )
-
-        # Export V+H
-        df_v = df[["Pallets","Total_disp","Rounded_disp",f"{sym}/pallet (rounded)"]].rename(
-            columns={"Total_disp": f"Total ({sym})", "Rounded_disp": f"Rounded ({sym})"}
-        ).copy()
-
-        row = {
-            "currency": currency,
-            "fx_EUR_to_SEK": fx,
-            "round_step_disp": rounding_step_disp,
-            "ftl_pallets": ftl_pallets,
-            "ftl_total_disp": ftl_price_disp,
-            "mode": "BANDS",
-        }
-        for _, r in df.iterrows():
-            n = int(r["Pallets"])
-            row[f"N{n}_Rounded({sym})"] = r["Rounded_disp"]
-        df_h = pd.DataFrame([row])
-
-        try:
-            xlsx = to_excel_bytes({"Pallet_V": df_v, "Pallet_H": df_h})
-            st.download_button(
-                "Export Pallet Scaler (V+H)",
-                data=xlsx,
-                file_name="pallet_scaler.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="pallet_export_xlsx_bands",
-            )
-        except Exception as e:
-            st.error(str(e))
+    st.download_button("Download container table (CSV)", data=df_cont.to_csv(index=False), file_name="container_prices.csv", key="cont_download")
 
 # ------------------------ Admin ------------------------
-with tabs[5]:
+with tabs[4]:
     st.subheader("Admin – lanes & settings")
     st.info("Use the JSON export/import in the sidebar for backups. Data persists in your browser session.")
 

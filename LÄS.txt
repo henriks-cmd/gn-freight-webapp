@@ -1,0 +1,6 @@
+KÖR DETTA I NY CHAT SÅ ÄR DEN PÅ BANAN:
+
+Projekt: GN Freight WebApp (Streamlit, Python)
+Repo: https://github.com/henriks-cmd/gn-freight-webapp
+Ny funktion: [beskriv vad vi ska bygga/fixa]
+Se README + docs/ROADMAP.md för nuläge.

@@ -1,0 +1,4 @@
+cd "/Users/macbookair/Desktop/GN/Prisberäkning/Webapp"
+cp app.py app.py.bak.$(date +%s)
+# Markera ALL kod i svaret → kopiera (Cmd+C) → klistra in:
+pbpaste > app.py
