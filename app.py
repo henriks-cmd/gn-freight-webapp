@@ -410,7 +410,7 @@ with tabs[0]:
                 "component": ["base", "percent", "per LDM", "per kg", "flat (incl FR)", "total_raw", "total_rounded"],
                 "EUR": [base[1], percent_eur, per_ldm_eur, per_kg_eur, flat_eur, total_raw, total_rounded],
             })
-            st.dataframe(df_totals.style.format({"EUR": "€ {:.2f}"}), use_container_width=True)
+            st.dataframe(df_totals.style.format({"EUR": "€ {:.2f}"}), width='stretch')
         with t2:
             st.metric("Total (rounded)", f"€ {total_rounded:.2f}", help=f"raw € {total_raw:.2f}")
 
@@ -505,7 +505,7 @@ with tabs[1]:
         ldm_rows.append({"LDM": L, "kg": kgL, "Price EUR": price})
 
     df_ldm = pd.DataFrame(ldm_rows)
-    st.dataframe(df_ldm.style.format({"kg": "{:.0f}", "Price EUR": "€ {:.2f}"}), use_container_width=True)
+    st.dataframe(df_ldm.style.format({"kg": "{:.0f}", "Price EUR": "€ {:.2f}"}), width='stretch')
 
     # Export V+H
     df_v = df_ldm.copy()
@@ -525,9 +525,16 @@ with tabs[1]:
     except Exception as e:
         st.error(str(e))
 
-# ------------------------ Weight Scaler (retier) ------------------------
+# # ------------------------ Weight Scaler (retier) ------------------------
 with tabs[2]:
     st.subheader("Weight Scaler – retier to new breaks")
+
+    st.info(
+        "Vad visar vad:\n"
+        "• **Band Total €** = bara priset för det aktuella intervallet (bandet).\n"
+        "• **Cumulative Total €** = pris från 0 kg fram till brytviktens slut (stigande, lätt att sanity-checka).\n"
+        "• **Avg €/kg** = bandets genomsnittliga €/kg (användbar som fast band-tariff)."
+    )
 
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -566,8 +573,52 @@ with tabs[2]:
             value="500, 1000-2500:250, 5000, 10000, 25160",
             key="weight_breaks",
         )
+
+        # Robust parser för tal och intervall (samma som i övriga flikar)
+        def parse_numbers_and_ranges(text: str) -> List[float]:
+            import re, numpy as np, math
+            if not text:
+                return []
+            t = (text or "").strip()
+            t = t.replace("\u2013", "-").replace("\u2014", "-")
+            t = t.replace(";", " ").replace(",", " ")
+            tokens = [tok for tok in re.split(r"\s+", t) if tok]
+            out = []
+            for tok in tokens:
+                tok = tok.replace("_", "")
+                m = re.fullmatch(r"(?i)\s*([0-9]+(?:\.[0-9]+)?)\s*-\s*([0-9]+(?:\.[0-9]+)?)(?::([0-9]+(?:\.[0-9]+)?))?(?:@([0-9]+))?\s*", tok)
+                if m:
+                    a = float(m.group(1)); b = float(m.group(2))
+                    step_s = m.group(3); count_s = m.group(4)
+                    if count_s and step_s:
+                        count_s = None
+                    if step_s:
+                        step = float(step_s)
+                        if step <= 0:
+                            continue
+                        n = int(math.floor((b - a) / step + 1e-9))
+                        vals = [a + i * step for i in range(0, n + 1)]
+                        if len(vals) == 0 or vals[-1] < b - 1e-9:
+                            vals.append(b)
+                    elif count_s:
+                        cnt = max(2, int(count_s))
+                        vals = list(np.linspace(a, b, cnt))
+                    else:
+                        vals = [a, b]
+                    out.extend(vals)
+                else:
+                    try:
+                        n = float(tok)
+                        if math.isfinite(n):
+                            out.append(float(n))
+                    except Exception:
+                        pass
+            out = sorted({round(v, 6) for v in out})
+            return out
+
         new_breaks = parse_numbers_and_ranges(breaks_text)
 
+        # --- Modellfunktioner (oskalade) ---
         def rate_at_raw(kg: float) -> float:
             if chosen == "EXP":
                 A, d = exp_fit["A"], exp_fit["d"]
@@ -590,6 +641,7 @@ with tabs[2]:
                     return (A or 0) * math.log(max(kg, 1e-9))
                 return (A / (b + 1)) * (kg ** (b + 1))
 
+        # --- Normalisering via anchor ---
         scale = 1.0
         if anchor_mode == "MATCH_TOTAL_AT_KG" and (anchor_total or 0) > 0 and (anchor_kg or 0) > 0:
             model_total = integral_to_raw(anchor_kg)
@@ -603,22 +655,26 @@ with tabs[2]:
         def integral_to(kg: float) -> float:
             return scale * integral_to_raw(kg)
 
+        # --- Beräkna band + kumulativt ---
         out_rows = []
         start = 0.0
+        cum_total = 0.0
         for brk in new_breaks:
             width = brk - start
             r_break = rate_at(brk)
             if method == "INTEGRATED":
-                total = integral_to(brk) - integral_to(start)
+                band_total = integral_to(brk) - integral_to(start)
             else:
-                total = r_break * width
-            avg_eur_per_kg = total / width if width > 0 else float("nan")
+                band_total = r_break * width
+            avg_eur_per_kg = band_total / width if width > 0 else float("nan")
+            cum_total += band_total
             out_rows.append({
                 "BreakToKg": brk,
                 "BandStartKg": start,
                 "WidthKg": width,
                 "Rate@break €/kg": r_break,
-                "Band Total €": total,
+                "Band Total €": band_total,
+                "Cumulative Total €": cum_total,
                 "Avg €/kg": avg_eur_per_kg,
             })
             start = brk
@@ -630,29 +686,41 @@ with tabs[2]:
             "WidthKg": "{:.0f}",
             "Rate@break €/kg": "{:.4f}",
             "Band Total €": "€ {:.2f}",
+            "Cumulative Total €": "€ {:.2f}",
             "Avg €/kg": "{:.4f}",
-        }), use_container_width=True)
+        }), width='stretch')
 
-        # Export V+H
-        df_v = df_out.copy()
-        row = {"lane": lane_id, "model": chosen, "method": method,
-               "anchor_mode": anchor_mode, "anchor_kg": anchor_kg,
-               "anchor_total": anchor_total, "scale": scale}
-        for _, r in df_out.iterrows():
-            brk = int(r["BreakToKg"])
-            row[f"Band_≤{brk}_Total€"] = r["Band Total €"]
-        df_h = pd.DataFrame([row])
+        # Export CSV + (om du har Excel-funktionen) V+H
+        st.download_button(
+            "Download new ladder (CSV)",
+            data=df_out.to_csv(index=False),
+            file_name=f"{lane_id.replace('>','-')}-retiered.csv",
+            key="weight_download"
+        )
+
+        # Om din app-version har to_excel_bytes, exportera även V+H:
         try:
+            df_v = df_out.copy()
+            row = {"lane": lane_id, "model": chosen, "method": method,
+                   "anchor_mode": anchor_mode, "anchor_kg": anchor_kg,
+                   "anchor_total": anchor_total, "scale": scale}
+            for _, r in df_out.iterrows():
+                brk = int(r["BreakToKg"])
+                row[f"Band_≤{brk}_Total€"] = r["Band Total €"]
+                row[f"Cumulative_≤{brk}_Total€"] = r["Cumulative Total €"]
+                row[f"Avg_≤{brk}_€/kg"] = r["Avg €/kg"]
+            df_h = pd.DataFrame([row])
+
             xlsx = to_excel_bytes({"Retier_V": df_v, "Retier_H": df_h})
             st.download_button(
-                "Export Weight Scaler (V+H)",
+                "Export Weight Scaler (Excel V+H)",
                 data=xlsx,
                 file_name="weight_scaler.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 key="weight_export_xlsx",
             )
-        except Exception as e:
-            st.error(str(e))
+        except Exception:
+            pass
 
 # ------------------------ Weight from FTL (manual weights/ranges) ------------------------
 with tabs[3]:
@@ -742,7 +810,7 @@ with tabs[3]:
         "Total EUR": "€ {:.2f}",
         "Rounded EUR": "€ {:.2f}",
         "Avg €/kg": "{:.4f}",
-    }), use_container_width=True)
+    }), width='stretch')
 
     # Export V+H
     df_v = df_wftl.copy()
@@ -820,7 +888,7 @@ with tabs[4]:
         "Total EUR": "€ {:.2f}",
         "Rounded EUR": "€ {:.2f}",
         "EUR/container": "€ {:.2f}"
-    }), use_container_width=True)
+    }), width='stretch')
 
     # Export V+H
     df_v = df_cont.copy()
@@ -916,7 +984,7 @@ with tabs[5]:
             df[["Pallets","Total (disp)","Rounded (disp)",f"{sym}/pallet (rounded)"]].rename(
                 columns={"Total (disp)": f"Total ({sym})", "Rounded (disp)": f"Rounded ({sym})"}
             ).style.format({f"Total ({sym})": f"{sym} " + "{:.2f}", f"Rounded ({sym})": f"{sym} " + "{:.2f}", f"{sym}/pallet (rounded)": f"{sym} " + "{:.2f}"}),
-            use_container_width=True
+            width='stretch'
         )
 
         df_v = df[["Pallets","Total (EUR)","Total (disp)","Rounded (disp)",f"{sym}/pallet (rounded)"]].rename(
@@ -954,7 +1022,7 @@ with tabs[5]:
         df_bands = st.data_editor(
             default_bands,
             num_rows="dynamic",
-            use_container_width=True,
+            width='stretch',
             key="pallet_bands_editor"
         )
 
@@ -994,7 +1062,7 @@ with tabs[5]:
             df[["Pallets","Total_disp","Rounded_disp",f"{sym}/pallet (rounded)"]].rename(
                 columns={"Total_disp": f"Total ({sym})", "Rounded_disp": f"Rounded ({sym})"}
             ).style.format({f"Total ({sym})": f"{sym} " + "{:.2f}", f"Rounded ({sym})": f"{sym} " + "{:.2f}", f"{sym}/pallet (rounded)": f"{sym} " + "{:.2f}"}),
-            use_container_width=True
+            width='stretch'
         )
 
         df_v = df[["Pallets","Total_disp","Rounded_disp",f"{sym}/pallet (rounded)"]].rename(
@@ -1047,7 +1115,7 @@ with tabs[6]:
         with c1:
             st.write("Per-kg ladder (breaks ascending)")
             df = pd.DataFrame(lane.get("perKg", []))
-            df = st.data_editor(df, num_rows="dynamic", use_container_width=True, key=f"edit_perkg_{selected_lane}")
+            df = st.data_editor(df, num_rows="dynamic", width='stretch', key=f"edit_perkg_{selected_lane}")
             lane["perKg"] = [
                 {"breakToKg": clamp_number(r.get("breakToKg")) or 0,
                  "ratePerKg": clamp_number(r.get("ratePerKg")) or 0,
