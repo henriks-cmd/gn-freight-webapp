@@ -1,19 +1,19 @@
-# GN Freight WebApp – Streamlit MVP (single-file)
+# GN Freight WebApp – Streamlit (single-file)
 # -------------------------------------------------------------
 # Run locally:
 #   pip install streamlit numpy pandas XlsxWriter openpyxl
 #   streamlit run app.py
 #
-# Features:
-# - Calculator: per-kg ladder (breaks+min), per-pallet, per-FLM, Auto-lowest
-# - Curve fit: POWER & EXP from kg ladder (shows R²)
-# - Surcharges: fuel %, MARPOL %, extra %, per-LDM, per-kg, flat; FR roadfee helper
-# - LDM Scaler: 1–13 LDM from P13 (POWER/EXP) or from fitted model
-# - Weight Scaler: retier to new weight breaks (INTEGRATED exact / POINT approx) + Anchor
-# - Containers: scale 1–19 from FTL (=20 containers)
-# - Pallet Scaler: from FTL pallets+price → per pallet (1..N) via model OR bands (intervals), with EUR/SEK toggle
-# - Admin: manage lanes, settings, import/export JSON
-# - Excel export: Vertical + Horizontal sheets on relevant tabs
+# Features (kort):
+# - Calculator (per-kg/per-pallet/per-FLM + surcharges + FR roadfee helper)
+# - Fit POWER/EXP från kg-ladder (R²)
+# - LDM Scaler (från P13 eller fit)
+# - Weight Scaler (retier till nya brytvikter via INTEGRATED/POINT + anchor)
+# - Weight from FTL (skala vikter från exakt FTL-pris) — med manuella intervall/ranges
+# - Containers (1–19 från FTL=20)
+# - Pallet Scaler (modell eller band; EUR/SEK)
+# - Admin (lanes + settings)
+# - Excel export: V+H på skalers
 
 import io
 import json
@@ -26,7 +26,7 @@ import pandas as pd
 import streamlit as st
 
 st.set_page_config(page_title="GN Freight WebApp", layout="wide")
-__version__ = "2025-11-04.1"  # bump on release
+__version__ = "2025-12-02.2"  # bump on release
 
 # ------------------------ Helpers ------------------------
 
@@ -120,6 +120,56 @@ def to_excel_bytes(sheets: Dict[str, pd.DataFrame]) -> bytes:
             last_err = e
     raise RuntimeError(f"Excel export needs xlsxwriter or openpyxl. Last error: {last_err}")
 
+
+# ---- Robust parser for numbers & ranges ----
+# Accepts tokens like:
+#   500                     → [500]
+#   500, 1000 2000          → [500, 1000, 2000]
+#   500-2500:500            → 500,1000,1500,2000,2500 (inclusive)
+#   500-2500@5              → 5 evenly spaced points between 500 and 2500 (inclusive)
+#   1_000–2_500:250         → same (underscores allowed, en-dash/em-dash ok)
+# Whitespace/comma/semicolon separated. Duplicates removed, sorted ascending.
+
+def parse_numbers_and_ranges(text: str) -> List[float]:
+    if not text:
+        return []
+    # normalize
+    t = (text or "").strip()
+    t = t.replace("\u2013", "-").replace("\u2014", "-")  # en/em dash → hyphen
+    t = t.replace(";", " ").replace(",", " ")
+    tokens = [tok for tok in re.split(r"\s+", t) if tok]
+
+    out: List[float] = []
+    for tok in tokens:
+        tok = tok.replace("_", "")  # allow 1_000 style
+        m = re.fullmatch(r"(?i)\s*([0-9]+(?:\.[0-9]+)?)\s*-\s*([0-9]+(?:\.[0-9]+)?)(?::([0-9]+(?:\.[0-9]+)?))?(?:@([0-9]+))?\s*", tok)
+        if m:
+            a = float(m.group(1)); b = float(m.group(2))
+            step_s = m.group(3); count_s = m.group(4)
+            if count_s and step_s:
+                count_s = None  # explicit step wins
+            if step_s:
+                step = float(step_s)
+                if step <= 0:
+                    continue
+                n = int(math.floor((b - a) / step + 0.0000001))
+                vals = [a + i * step for i in range(0, n + 1)]
+                if len(vals) == 0 or vals[-1] < b - 1e-9:
+                    vals.append(b)
+            elif count_s:
+                cnt = max(2, int(count_s))
+                vals = list(np.linspace(a, b, cnt))
+            else:
+                vals = [a, b]
+            out.extend(vals)
+        else:
+            n = clamp_number(tok)
+            if n is not None:
+                out.append(float(n))
+    # dedupe + sort
+    out = sorted({round(v, 6) for v in out})
+    return out
+
 # ------------------------ Defaults & State ------------------------
 
 DEFAULT_STATE = {
@@ -162,7 +212,6 @@ DEFAULT_STATE = {
         "perLdmEUR": 0.0,
         "perKgEUR": 0.0,
         "flatEUR": 0.0,
-        # FR roadfee helper
         "frClass": 4,
         "frKm": 0.0,
         "frEurPerKmClass3": 0.27,
@@ -225,7 +274,16 @@ with st.sidebar.expander("Data: lanes import/export", expanded=False):
             st.error(f"Failed to load: {e}")
 
 # ------------------------ Tabs ------------------------
-tabs = st.tabs(["Calculator", "LDM Scaler", "Weight Scaler", "Containers", "Pallet Scaler", "Admin"])
+
+tabs = st.tabs([
+    "Calculator",
+    "LDM Scaler",
+    "Weight Scaler",
+    "Weight from FTL",
+    "Containers",
+    "Pallet Scaler",
+    "Admin",
+])
 
 # ------------------------ Calculator ------------------------
 with tabs[0]:
@@ -289,6 +347,7 @@ with tabs[0]:
         c3.metric("Per FLM", f"€ {total_flm:.2f}")
         c4.metric("Chosen", f"{base[0]} → € {base[1]:.2f}")
 
+        # Fit från ladder
         rows_for_fit = [
             dict(breakToKg=float(r.get("breakToKg")), ratePerKg=float(r.get("ratePerKg")))
             for r in lane.get("perKg", []) if clamp_number(r.get("breakToKg")) and clamp_number(r.get("ratePerKg"))
@@ -355,7 +414,7 @@ with tabs[0]:
         with t2:
             st.metric("Total (rounded)", f"€ {total_rounded:.2f}", help=f"raw € {total_raw:.2f}")
 
-        st.markdown("#### Export")
+        # Export V+H
         df_v = df_totals.copy()
         df_h = pd.DataFrame([{
             "lane": lane_id,
@@ -448,12 +507,12 @@ with tabs[1]:
     df_ldm = pd.DataFrame(ldm_rows)
     st.dataframe(df_ldm.style.format({"kg": "{:.0f}", "Price EUR": "€ {:.2f}"}), use_container_width=True)
 
+    # Export V+H
     df_v = df_ldm.copy()
     row = {"kg_per_flm": kg_per_flm, "mode": mode, "model": chosen, "p13": p13, "b": b, "d": d}
     for _, r in df_ldm.iterrows():
         row[f"LDM_{int(r['LDM'])}"] = r["Price EUR"]
     df_h = pd.DataFrame([row])
-
     try:
         xlsx = to_excel_bytes({"LDM_V": df_v, "LDM_H": df_h})
         st.download_button(
@@ -466,7 +525,7 @@ with tabs[1]:
     except Exception as e:
         st.error(str(e))
 
-# ------------------------ Weight Scaler ------------------------
+# ------------------------ Weight Scaler (retier) ------------------------
 with tabs[2]:
     st.subheader("Weight Scaler – retier to new breaks")
 
@@ -501,13 +560,13 @@ with tabs[2]:
         with a3:
             anchor_total = st.number_input("Anchor total € at weight", value=0.0, step=10.0, key="weight_anchor_total")
 
+        st.caption("Enter breaks as numbers and/or ranges. Examples: '500, 1000-2500:250, 5000, 10000, 25160' or '500-2500@5'.")
         breaks_text = st.text_area(
-            "New breaks (kg), comma/semicolon/space separated",
-            value="500, 1000, 2000, 5000, 10000, 25160",
-            key="weight_breaks"
+            "New breaks (kg)",
+            value="500, 1000-2500:250, 5000, 10000, 25160",
+            key="weight_breaks",
         )
-        tokens = re.split(r"[,;\s]+", breaks_text.strip())
-        new_breaks = sorted({float(n) for n in (clamp_number(tok) for tok in tokens) if n and n > 0})
+        new_breaks = parse_numbers_and_ranges(breaks_text)
 
         def rate_at_raw(kg: float) -> float:
             if chosen == "EXP":
@@ -528,7 +587,7 @@ with tabs[2]:
             else:
                 A, b = pow_fit["A"], pow_fit["b"]
                 if abs((b or 0) + 1) < 1e-12:
-                    return (A or 0) * math.log(kg)
+                    return (A or 0) * math.log(max(kg, 1e-9))
                 return (A / (b + 1)) * (kg ** (b + 1))
 
         scale = 1.0
@@ -574,21 +633,15 @@ with tabs[2]:
             "Avg €/kg": "{:.4f}",
         }), use_container_width=True)
 
+        # Export V+H
         df_v = df_out.copy()
-        row = {
-            "lane": lane_id,
-            "model": chosen,
-            "method": method,
-            "anchor_mode": anchor_mode,
-            "anchor_kg": anchor_kg,
-            "anchor_total": anchor_total,
-            "scale": scale,
-        }
+        row = {"lane": lane_id, "model": chosen, "method": method,
+               "anchor_mode": anchor_mode, "anchor_kg": anchor_kg,
+               "anchor_total": anchor_total, "scale": scale}
         for _, r in df_out.iterrows():
             brk = int(r["BreakToKg"])
             row[f"Band_≤{brk}_Total€"] = r["Band Total €"]
         df_h = pd.DataFrame([row])
-
         try:
             xlsx = to_excel_bytes({"Retier_V": df_v, "Retier_H": df_h})
             st.download_button(
@@ -601,8 +654,125 @@ with tabs[2]:
         except Exception as e:
             st.error(str(e))
 
-# ------------------------ Containers Scaler ------------------------
+# ------------------------ Weight from FTL (manual weights/ranges) ------------------------
 with tabs[3]:
+    st.subheader("Weight from FTL – scale totals by weight from an exact FTL price")
+
+    c0, c1, c2, c3 = st.columns(4)
+    with c0:
+        lane_id = st.text_input("Lane ID (for optional fit)", value="SE->FR", key="wftl_lane")
+    with c1:
+        ftl_kg_default = 13 * state["settings"]["kgPerFLM"]
+        anchor_kg = st.number_input("FTL kg (anchor weight)", value=float(ftl_kg_default), step=100.0, key="wftl_anchor_kg")
+    with c2:
+        ftl_price = st.number_input("FTL price (€)", value=2000.0, step=10.0, key="wftl_ftl_price")
+    with c3:
+        rounding_step = st.number_input("Rounding step €", value=state["settings"]["roundingStep"], step=1.0, key="wftl_round")
+
+    m1, m2, m3, m4 = st.columns(4)
+    with m1:
+        model_sel = st.selectbox("Model", options=["AUTO","POWER","EXP","MANUAL_POWER","MANUAL_EXP"], index=0, key="wftl_model")
+    with m2:
+        b_par = st.number_input("POWER: b", value=-0.25, step=0.01, format="%.5f", key="wftl_b")
+    with m3:
+        d_par = st.number_input("EXP: d", value=-0.00002, step=0.00001, format="%.6f", key="wftl_d")
+    with m4:
+        st.caption("AUTO väljer bästa fit från lane om möjligt; annars används b/d ovan.")
+
+    st.caption("Ange vikter som lista och/eller ranges. Exempel: '500 750 1000-2500:250 10000 25160' eller '500-2500@5'.")
+    breaks_text = st.text_area(
+        "Weights to price (kg)",
+        value="500, 1000-2500:250, 5000, 10000, 25160",
+        key="wftl_breaks",
+    )
+    weight_list = parse_numbers_and_ranges(breaks_text)
+
+    lane = state["lanes"].get(lane_id)
+    rows_for_fit = []
+    if lane:
+        rows_for_fit = [
+            dict(breakToKg=float(r.get("breakToKg")), ratePerKg=float(r.get("ratePerKg")))
+            for r in lane.get("perKg", []) if clamp_number(r.get("breakToKg")) and clamp_number(r.get("ratePerKg"))
+        ]
+    pow_fit = fit_power_model(rows_for_fit) if rows_for_fit else dict(b=b_par, A=1.0, r2=float("nan"))
+    exp_fit = fit_exp_model(rows_for_fit) if rows_for_fit else dict(d=d_par, A=1.0, r2=float("nan"))
+
+    chosen = model_sel
+    if chosen == "AUTO":
+        if rows_for_fit and (exp_fit.get("r2") or 0) >= (pow_fit.get("r2") or 0):
+            chosen = "EXP"
+        else:
+            chosen = "POWER"
+
+    if chosen in ("POWER","MANUAL_POWER"):
+        b = (pow_fit.get("b") if chosen == "POWER" else b_par) or 0.0
+        A_raw = pow_fit.get("A", 1.0) if chosen == "POWER" else 1.0
+        def integral_raw(kg: float) -> float:
+            if kg <= 0: return 0.0
+            if abs(b + 1) < 1e-12:
+                return A_raw * math.log(max(kg, 1e-9))
+            return (A_raw / (b + 1)) * (kg ** (b + 1))
+    else:
+        d = (exp_fit.get("d") if chosen == "EXP" else d_par) or 0.0
+        A_raw = exp_fit.get("A", 1.0) if chosen == "EXP" else 1.0
+        def integral_raw(kg: float) -> float:
+            if kg <= 0: return 0.0
+            if abs(d) < 1e-12:
+                return A_raw * kg
+            return (A_raw / d) * (math.exp(d * kg) - 1)
+
+    base = integral_raw(anchor_kg)
+    scale = (ftl_price / base) if base and base > 0 else 0.0
+    st.caption(f"Normalization scale = {scale:.6f} (so total at {anchor_kg:.0f} kg = € {ftl_price:.2f})")
+
+    rows = []
+    for kg in weight_list:
+        total = scale * integral_raw(kg)
+        rounded = round_to_step(total, rounding_step)
+        avg_per_kg = total / kg if kg > 0 else float("nan")
+        rows.append({
+            "kg": kg,
+            "Total EUR": total,
+            "Rounded EUR": rounded,
+            "Avg €/kg": avg_per_kg,
+        })
+    df_wftl = pd.DataFrame(rows)
+    st.dataframe(df_wftl.style.format({
+        "kg": "{:.0f}",
+        "Total EUR": "€ {:.2f}",
+        "Rounded EUR": "€ {:.2f}",
+        "Avg €/kg": "{:.4f}",
+    }), use_container_width=True)
+
+    # Export V+H
+    df_v = df_wftl.copy()
+    row = {
+        "lane": lane_id,
+        "model": chosen,
+        "anchor_kg": anchor_kg,
+        "ftl_price": ftl_price,
+        "round_step": rounding_step,
+        "scale": scale,
+    }
+    for _, r in df_wftl.iterrows():
+        k = int(r["kg"])
+        row[f"KG_{k}_Total€"] = r["Total EUR"]
+        row[f"KG_{k}_Rounded€"] = r["Rounded EUR"]
+    df_h = pd.DataFrame([row])
+    try:
+        xlsx = to_excel_bytes({"WFTL_V": df_v, "WFTL_H": df_h})
+        st.download_button(
+            "Export Weight-from-FTL (V+H)",
+            data=xlsx,
+            file_name="weight_from_ftl.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="wftl_export_xlsx",
+        )
+    except Exception as e:
+        st.error(str(e))
+
+# ------------------------ Containers Scaler ------------------------
+with tabs[4]:
     st.subheader("Containers – scale 1–19 from FTL (20 containers)")
     col1, col2, col3, col4, col5, col6 = st.columns(6)
     with col1:
@@ -652,21 +822,14 @@ with tabs[3]:
         "EUR/container": "€ {:.2f}"
     }), use_container_width=True)
 
+    # Export V+H
     df_v = df_cont.copy()
-    row = {
-        "kg_per_container": kg_per_container,
-        "model": chosen,
-        "p20": p20,
-        "b": b_cont,
-        "d": d_cont,
-        "rounding_step": rounding_step,
-    }
+    row = {"kg_per_container": kg_per_container, "model": chosen, "p20": p20, "b": b_cont, "d": d_cont, "rounding_step": rounding_step}
     for _, r in df_cont.iterrows():
         n = int(r["Containers"])
         row[f"N{n}_Total€"] = r["Total EUR"]
         row[f"N{n}_Rounded€"] = r["Rounded EUR"]
     df_h = pd.DataFrame([row])
-
     try:
         xlsx = to_excel_bytes({"Containers_V": df_v, "Containers_H": df_h})
         st.download_button(
@@ -679,11 +842,10 @@ with tabs[3]:
     except Exception as e:
         st.error(str(e))
 
-# ------------------------ Pallet Scaler (NEW) ------------------------
-with tabs[4]:
-    st.subheader("Pallet Scaler – from FTL pallets + price")
+# ------------------------ Pallet Scaler ------------------------
+with tabs[5]:
+    st.subheader("Pallet Scaler – model or bands (EUR/SEK)")
 
-    # --- Currency block (only for this tab for now) ---
     c0, c1, c2, c3 = st.columns([1.2, 1, 1, 1])
     with c0:
         currency = st.selectbox("Currency", options=["EUR","SEK"], index=0, key="pallet_currency")
@@ -706,7 +868,6 @@ with tabs[4]:
 
     sym = "€" if currency == "EUR" else "kr"
 
-    # --- Baseline (FTL) ---
     b1, b2 = st.columns(2)
     with b1:
         ftl_pallets = int(st.number_input("FTL pallets (e.g. 33 or 34)", value=34, step=1, min_value=1, max_value=120, key="pallet_ftl_count"))
@@ -727,7 +888,6 @@ with tabs[4]:
 
         chosen = model_choice
         if chosen == "AUTO":
-            # Default to POWER unless user prefers EXP
             chosen = "POWER"
 
         rows = []
@@ -735,7 +895,6 @@ with tabs[4]:
             if chosen == "POWER":
                 total_eur = ftl_price_eur * ((n / ftl_pallets) ** (b_par + 1))
             else:
-                # EXP using counts (analogous to LDM/Containers approach)
                 if ftl_pallets > 0:
                     total_eur = ftl_price_eur * ((n / ftl_pallets) * math.exp(d_par * (n - ftl_pallets)))
                 else:
@@ -744,41 +903,29 @@ with tabs[4]:
 
         df = pd.DataFrame(rows)
         if ensure_match_ftl and ftl_pallets > 0:
-            # Scale so that last row equals exactly FTL price
             last = df.loc[df["Pallets"] == ftl_pallets, "Total (EUR)"].values
-            if len(last) and last[0] not in (None, 0, float("nan")):
-                scale = ftl_price_eur / last[0] if last[0] else 1.0
+            if len(last) and last[0]:
+                scale = ftl_price_eur / last[0]
                 df["Total (EUR)"] = df["Total (EUR)"] * scale
 
         df["Total (disp)"] = df["Total (EUR)"].apply(to_disp)
-        df["Rounded (disp)"] = df["Total (disp)"].apply(lambda x: round_to_step(x, rounding_step_disp))
+        df["Rounded (disp)"] = df["Total (disp)"] .apply(lambda x: round_to_step(x, rounding_step_disp))
         df[f"{sym}/pallet (rounded)"] = df.apply(lambda r: (r["Rounded (disp)"] / r["Pallets"]) if r["Pallets"]>0 else float("nan"), axis=1)
 
         st.dataframe(
             df[["Pallets","Total (disp)","Rounded (disp)",f"{sym}/pallet (rounded)"]].rename(
                 columns={"Total (disp)": f"Total ({sym})", "Rounded (disp)": f"Rounded ({sym})"}
-            ).style.format({f"Total ({sym})": f"{sym} "+"{:.2f}", f"Rounded ({sym})": f"{sym} "+"{:.2f}", f"{sym}/pallet (rounded)": f"{sym} "+"{:.2f}"}),
+            ).style.format({f"Total ({sym})": f"{sym} " + "{:.2f}", f"Rounded ({sym})": f"{sym} " + "{:.2f}", f"{sym}/pallet (rounded)": f"{sym} " + "{:.2f}"}),
             use_container_width=True
         )
 
-        # Export V+H
         df_v = df[["Pallets","Total (EUR)","Total (disp)","Rounded (disp)",f"{sym}/pallet (rounded)"]].rename(
             columns={"Total (disp)": f"Total ({sym})", "Rounded (disp)": f"Rounded ({sym})"}
         ).copy()
-
-        row = {
-            "currency": currency,
-            "fx_EUR_to_SEK": fx,
-            "round_step_disp": rounding_step_disp,
-            "ftl_pallets": ftl_pallets,
-            "ftl_total_disp": ftl_price_disp,
-            "model": chosen,
-            "b": b_par,
-            "d": d_par,
-        }
+        row = {"currency": currency, "fx_EUR_to_SEK": fx, "round_step_disp": rounding_step_disp,
+               "ftl_pallets": ftl_pallets, "ftl_total_disp": ftl_price_disp, "model": chosen, "b": b_par, "d": d_par}
         for _, r in df.iterrows():
-            n = int(r["Pallets"])
-            row[f"N{n}_Rounded({sym})"] = r["Rounded (disp)"]
+            n = int(r["Pallets"]); row[f"N{n}_Rounded({sym})"] = r["Rounded (disp)"]
         df_h = pd.DataFrame([row])
 
         try:
@@ -795,9 +942,8 @@ with tabs[4]:
 
     else:
         st.markdown("#### Bands (intervals)")
-        st.caption("Exempel: 1–3 pall = X/pall, 4–6 = Y/pall, etc. Du anger priser i vald valuta.")
+        st.caption("Ex: 1–3 pall = X/pall, 4–6 = Y/pall, etc. Priser i vald valuta.")
 
-        # Default bands proposal
         default_bands = pd.DataFrame([
             {"From": 1, "To": 3, "Rate_per_pallet": 150 if currency=="EUR" else 150*fx, "Min_total": 0},
             {"From": 4, "To": 6, "Rate_per_pallet": 120 if currency=="EUR" else 120*fx, "Min_total": 0},
@@ -814,7 +960,6 @@ with tabs[4]:
 
         normalize_to_ftl = st.checkbox("Normalize totals so N=FTL equals FTL total", value=True, key="pallet_bands_norm")
 
-        # Build per-count table from bands
         def band_for_n(n: int):
             for _, r in df_bands.iterrows():
                 f = int(clamp_number(r.get("From")) or 0)
@@ -823,12 +968,9 @@ with tabs[4]:
                     rate_disp = clamp_number(r.get("Rate_per_pallet")) or 0.0
                     min_total_disp = clamp_number(r.get("Min_total")) or 0.0
                     return rate_disp, min_total_disp
-            # If not found, try last row
             if len(df_bands) > 0:
                 r = df_bands.iloc[-1]
-                rate_disp = clamp_number(r.get("Rate_per_pallet")) or 0.0
-                min_total_disp = clamp_number(r.get("Min_total")) or 0.0
-                return rate_disp, min_total_disp
+                return clamp_number(r.get("Rate_per_pallet")) or 0.0, clamp_number(r.get("Min_total")) or 0.0
             return 0.0, 0.0
 
         rows = []
@@ -841,8 +983,8 @@ with tabs[4]:
 
         if normalize_to_ftl and ftl_pallets > 0:
             last = df.loc[df["Pallets"] == ftl_pallets, "Total_disp"].values
-            if len(last) and last[0] not in (None, 0, float("nan")):
-                scale = (ftl_price_disp or 0.0) / last[0] if last[0] else 1.0
+            if len(last) and last[0]:
+                scale = (ftl_price_disp or 0.0) / last[0]
                 df["Total_disp"] = df["Total_disp"] * scale
 
         df["Rounded_disp"] = df["Total_disp"].apply(lambda x: round_to_step(x, rounding_step_disp))
@@ -851,26 +993,17 @@ with tabs[4]:
         st.dataframe(
             df[["Pallets","Total_disp","Rounded_disp",f"{sym}/pallet (rounded)"]].rename(
                 columns={"Total_disp": f"Total ({sym})", "Rounded_disp": f"Rounded ({sym})"}
-            ).style.format({f"Total ({sym})": f"{sym} "+"{:.2f}", f"Rounded ({sym})": f"{sym} "+"{:.2f}", f"{sym}/pallet (rounded)": f"{sym} "+"{:.2f}"}),
+            ).style.format({f"Total ({sym})": f"{sym} " + "{:.2f}", f"Rounded ({sym})": f"{sym} " + "{:.2f}", f"{sym}/pallet (rounded)": f"{sym} " + "{:.2f}"}),
             use_container_width=True
         )
 
-        # Export V+H
         df_v = df[["Pallets","Total_disp","Rounded_disp",f"{sym}/pallet (rounded)"]].rename(
             columns={"Total_disp": f"Total ({sym})", "Rounded_disp": f"Rounded ({sym})"}
         ).copy()
-
-        row = {
-            "currency": currency,
-            "fx_EUR_to_SEK": fx,
-            "round_step_disp": rounding_step_disp,
-            "ftl_pallets": ftl_pallets,
-            "ftl_total_disp": ftl_price_disp,
-            "mode": "BANDS",
-        }
+        row = {"currency": currency, "fx_EUR_to_SEK": fx, "round_step_disp": rounding_step_disp,
+               "ftl_pallets": ftl_pallets, "ftl_total_disp": ftl_price_disp, "mode": "BANDS"}
         for _, r in df.iterrows():
-            n = int(r["Pallets"])
-            row[f"N{n}_Rounded({sym})"] = r["Rounded_disp"]
+            n = int(r["Pallets"]); row[f"N{n}_Rounded({sym})"] = r["Rounded_disp"]
         df_h = pd.DataFrame([row])
 
         try:
@@ -886,7 +1019,7 @@ with tabs[4]:
             st.error(str(e))
 
 # ------------------------ Admin ------------------------
-with tabs[5]:
+with tabs[6]:
     st.subheader("Admin – lanes & settings")
     st.info("Use the JSON export/import in the sidebar for backups. Data persists in your browser session.")
 
